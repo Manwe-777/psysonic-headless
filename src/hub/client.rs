@@ -10,6 +10,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info, warn};
 
+use super::library;
 use super::protocol::{self, PROTOCOL};
 use crate::player::{Command, Snapshot, Status};
 use crate::subsonic::{Song, Subsonic};
@@ -176,11 +177,48 @@ impl Session {
                     self.follow_saved_queue();
                 }
             }
+            "browse" => self.answer_browse(msg["rid"].clone(), msg["req"].clone()),
+            "art-request" => self.answer_art(msg),
             _ => {} // state, devices, settings...: not needed by a headless player (yet)
         }
     }
 
     /// A command from another device (protocol `command` actions).
+    /// A remote browses the library through this player.
+    fn answer_browse(&self, rid: Value, req: Value) {
+        let (client, out) = (self.client.clone(), self.out.clone());
+        tokio::spawn(async move {
+            let reply = match library::browse(&client, &req).await {
+                Ok(result) => json!({ "t": "browse-result", "rid": rid, "result": result }),
+                Err(e) => {
+                    warn!("library lookup failed: {e:#}");
+                    json!({ "t": "browse-result", "rid": rid, "error": "lookup_failed" })
+                }
+            };
+            let _ = out.send(reply);
+        });
+    }
+
+    /// The hub wants a cover for a library page (an answer without data means there is none).
+    fn answer_art(&self, msg: &Value) {
+        let (client, out) = (self.client.clone(), self.out.clone());
+        let rid = msg["rid"].clone();
+        let cover = msg["coverArt"].as_str().unwrap_or_default().to_string();
+        let size = msg["size"].as_u64().unwrap_or(160).clamp(32, 1200) as u32;
+        tokio::spawn(async move {
+            let art = if cover.is_empty() {
+                None
+            } else {
+                library::artwork(&client, &cover, size).await
+            };
+            let reply = match art {
+                Some((mime, data)) => json!({ "t": "art", "rid": rid, "mime": mime, "data": data }),
+                None => json!({ "t": "art", "rid": rid }),
+            };
+            let _ = out.send(reply);
+        });
+    }
+
     fn apply(&self, action: &str, args: &Value) {
         let num = |key: &str| args[key].as_f64();
         match action {

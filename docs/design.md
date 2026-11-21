@@ -39,7 +39,7 @@ One binary, one process. Modules:
 - `audio`: the engine. Tracks are streamed: playback starts once the beginning of the file has arrived while the rest downloads, and reads wait only for bytes not there yet. Decoding is Psysonic's: Symphonia 0.6 with every format it supports (FLAC, MP3, AAC/M4A, ALAC, Ogg Vorbis, WAV, AIFF, PCM, ADPCM) plus Opus through libopus (bundled), with gapless trimming where the container reports the encoder gap. A rodio `Player` plays tracks back to back: the next track is loaded early and handed to the player in the last seconds of the current one (gapless), so queue edits until then still decide what follows. The output device is reopened when a track's sample rate differs from the open one. ReplayGain is applied as a fixed gain per track.
 - `player`: the queue (order, current position, shuffle, repeat) and the controller that drives the engine, preloads the next track and reports state.
 - `hub`: the hub client, protocol v1: a player device that reports its state and queue window, obeys commands, and takes part in handoffs through the server's saved play queue.
-- `library`: answers the hub's library lookups and artwork requests from the server.
+- `hub::library`: answers the hub's library lookups and artwork requests from the server, with the same page sizes and fields as the Psysonic desktop.
 
 ## Roadmap
 

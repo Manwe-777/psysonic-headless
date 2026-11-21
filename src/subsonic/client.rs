@@ -107,6 +107,11 @@ impl Subsonic {
     }
 
     /// Checks the address and the login.
+    /// Any endpoint's answer as JSON (`key` picks one field of the response).
+    pub async fn raw(&self, endpoint: &str, params: &[(&str, &str)], key: &str) -> Result<Value> {
+        self.get(endpoint, params, key).await
+    }
+
     pub async fn ping(&self) -> Result<()> {
         self.get::<Value>("ping.view", &[], "").await.map(|_| ())
     }
