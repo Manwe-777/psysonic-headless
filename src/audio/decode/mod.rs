@@ -7,4 +7,4 @@ mod probe_gate;
 mod stream;
 
 pub use decoder::Decoder;
-pub use stream::{Download, StreamSource, stream};
+pub use stream::{Download, RangeFetcher, StreamSource, stream};

@@ -1,5 +1,6 @@
 use std::num::NonZero;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -22,18 +23,35 @@ pub enum EngineEvent {
 pub struct LoadedTrack {
     pub token: u64,
     pub sample_rate: u32,
+    /// Where in the track it starts playing.
+    pub start: Duration,
     gain: f32,
     source: Decoder,
 }
 
 impl LoadedTrack {
-    /// Opens a stream that may still be downloading (blocks until its format is known). `hint` is
-    /// the container's file extension, if known.
-    pub fn decode(token: u64, media: StreamSource, hint: Option<&str>, gain: f32) -> Result<Self> {
-        let source = Decoder::open(Box::new(media), hint).map_err(|e| anyhow!("could not decode the track: {e}"))?;
+    /// Opens a stream that may still be downloading, positioned at `start`: it blocks until the
+    /// format is known and the audio at `start` has arrived, so nothing plays from elsewhere first.
+    /// `hint` is the container's file extension, if known.
+    pub fn decode(token: u64, media: StreamSource, hint: Option<&str>, gain: f32, start: Duration) -> Result<Self> {
+        let random_access = media.random_access();
+        let mut source = Decoder::open(Box::new(media), hint, random_access)
+            .map_err(|e| anyhow!("could not decode the track: {e}"))?;
+        let start = if start.is_zero() {
+            start
+        } else {
+            match source.try_seek(start) {
+                Ok(()) => start,
+                Err(e) => {
+                    warn!("could not start at {start:?}, starting from the beginning: {e}");
+                    Duration::ZERO
+                }
+            }
+        };
         Ok(Self {
             token,
             sample_rate: source.sample_rate().get(),
+            start,
             gain,
             source,
         })
@@ -44,6 +62,8 @@ struct Output {
     _sink: MixerDeviceSink,
     player: Player,
     sample_rate: u32,
+    /// Where the playing track started (in nanoseconds): the player counts from there.
+    offset: Arc<AtomicU64>,
 }
 
 struct Inner {
@@ -103,6 +123,7 @@ impl Engine {
             _sink: sink,
             player,
             sample_rate,
+            offset: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -110,7 +131,9 @@ impl Engine {
         let token = track.token;
         output.player.append(track.source.amplify(track.gain));
         let events = self.events.clone();
+        let offset = output.offset.clone();
         output.player.append(EmptyCallback::new(Box::new(move || {
+            offset.store(0, Ordering::Relaxed); // a track that follows starts at its beginning
             let _ = events.send(EngineEvent::Ended { token });
         })));
     }
@@ -129,6 +152,7 @@ impl Engine {
             inner.output = Some(self.open(track.sample_rate, inner.volume)?);
         }
         let output = inner.output.as_ref().unwrap();
+        output.offset.store(track.start.as_nanos() as u64, Ordering::Relaxed);
         self.push(output, track);
         output.player.play();
         Ok(())
@@ -183,6 +207,7 @@ impl Engine {
                 .player
                 .try_seek(position)
                 .map_err(|e| anyhow!("could not seek: {e}"))?;
+            output.offset.store(0, Ordering::Relaxed); // the player counts from the seek target
         }
         Ok(())
     }
@@ -194,7 +219,7 @@ impl Engine {
             .unwrap()
             .output
             .as_ref()
-            .map(|o| o.player.get_pos())
+            .map(|o| o.player.get_pos() + Duration::from_nanos(o.offset.load(Ordering::Relaxed)))
             .unwrap_or_default()
     }
 

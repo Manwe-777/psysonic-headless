@@ -44,6 +44,13 @@ fn is_mp4(hint: Option<&str>) -> bool {
     matches!(hint, Some("mp4" | "m4a" | "m4b" | "alac"))
 }
 
+/// Containers whose demuxer needs to seek during the probe to be seekable later: Ogg records the
+/// end of its byte range there (without it every seek fails), AIFF may have to find `COMM` past
+/// the audio data.
+fn seeks_while_probing(hint: Option<&str>) -> bool {
+    matches!(hint, Some("ogg" | "oga" | "opus" | "aif" | "aiff" | "aifc"))
+}
+
 pub struct Decoder {
     decoder: Box<dyn AudioDecoder>,
     current_frame_offset: usize,
@@ -59,9 +66,12 @@ pub struct Decoder {
 
 impl Decoder {
     /// Probes and opens a stream. `hint` is the container's file extension (`flac`, `ogg`, `m4a`...),
-    /// if known. Blocks until enough of the stream has arrived to know its format.
-    pub fn open(media: Box<dyn MediaSource>, hint: Option<&str>) -> Result<Self, String> {
-        let gate = (!is_mp4(hint)).then(|| Arc::new(AtomicBool::new(false)));
+    /// if known. `random_access`: reading anywhere in the source is cheap (a cached file, or ranged
+    /// requests), so the probe may seek. Blocks until enough of the stream has arrived to know its
+    /// format.
+    pub fn open(media: Box<dyn MediaSource>, hint: Option<&str>, random_access: bool) -> Result<Self, String> {
+        let gate_needed = !is_mp4(hint) && !(random_access && seeks_while_probing(hint));
+        let gate = gate_needed.then(|| Arc::new(AtomicBool::new(false)));
         let media: Box<dyn MediaSource> = match &gate {
             Some(seekable) => Box::new(ProbeSeekGate {
                 inner: media,

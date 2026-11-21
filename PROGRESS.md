@@ -7,11 +7,11 @@
 - Checked end to end against a local hub and a fake Subsonic server: playback in real time with gapless changes, control from the hub web page, cover on the page, handoff between two headless players.
 - **Streaming and every decoder:** playback starts once the first bytes arrive (a 90 MB hi-res FLAC took 13 s before); decoding ported from Psysonic with Symphonia 0.6 and every format plus Opus through bundled libopus, so Navidrome's transcodes (Opus/Ogg at a bitrate cap) play. Skipping to the already-loaded next track reuses it. Checked against the real Navidrome: a 320 kbps Opus transcode started in 60 ms.
 - **Milestone 3, library:** answers the hub's library lookups (albums by sort with paging, artists, playlists, search, an album, an artist, a playlist) and artwork requests, with the desktop's page sizes and fields. Checked against the real Navidrome through a local hub with only this player on: every lookup answered in 10 to 80 ms, artwork in under 10 ms.
+- **Ranged reads and starts at a position:** seeks and starts ahead of the download fetch that part with a Range request, and Ogg/AIFF stay seekable while probing (before, every seek on Navidrome's Opus transcodes failed and a handoff started at 0:00). A track starting at a position is positioned before it reaches the output. Checked with a handoff through a local hub into this player at 2:00 of a 320 kbps Opus stream: it resumed at 2:00, 0.3 s after the transfer.
 
 ## Known issues
 
 - Not yet tried on a real DAC, or in a handoff with the Psysonic desktop app.
-- A seek past what has downloaded waits for those bytes (no ranged requests yet).
 - A queue edit in the last 10 seconds of a track can't change the next track any more (it is already queued in the engine).
 
 ## Next

@@ -293,9 +293,11 @@ impl Controller {
     /// Plays the queue position `index` from `position`.
     fn start_at(&mut self, index: usize, position: Duration, play: bool) {
         // The next track is often already loaded (or loading): use it instead of fetching it again.
+        // Only from its start: a preloaded track sits at 0:00, and seeking it here would block.
         let ready = self
             .preloaded
             .take()
+            .filter(|_| position.is_zero())
             .filter(|(_, i, id)| *i == index && self.queue.get(index).is_some_and(|s| s.id == *id || id.is_empty()));
         self.stop();
         self.queue.jump(index);
@@ -363,7 +365,11 @@ impl Controller {
         tokio::spawn(async move {
             let result = async {
                 let (media, hint) = client.open_stream(&song.id).await?;
-                tokio::task::spawn_blocking(move || LoadedTrack::decode(token, media, hint, gain)).await?
+                let start = match purpose {
+                    Purpose::Start { position, .. } => position,
+                    Purpose::Next => Duration::ZERO,
+                };
+                tokio::task::spawn_blocking(move || LoadedTrack::decode(token, media, hint, gain, start)).await?
             }
             .await;
             let _ = tx.send(Loaded {
@@ -401,9 +407,7 @@ impl Controller {
                     self.error = Some(format!("{e:#}"));
                     return;
                 }
-                if !position.is_zero() {
-                    self.seek(position);
-                }
+                let _ = position; // the track was opened there
                 if !play {
                     self.engine.pause();
                 }

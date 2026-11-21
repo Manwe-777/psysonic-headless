@@ -36,7 +36,7 @@ One binary, one process. Modules:
 
 - `config`: flags and environment variables.
 - `subsonic`: the server client: authentication (salted token), stream URLs with quality options, albums, playlists, songs, the saved play queue, scrobbling and library lookups.
-- `audio`: the engine. Tracks are streamed: playback starts once the beginning of the file has arrived while the rest downloads, and reads wait only for bytes not there yet. Decoding is Psysonic's: Symphonia 0.6 with every format it supports (FLAC, MP3, AAC/M4A, ALAC, Ogg Vorbis, WAV, AIFF, PCM, ADPCM) plus Opus through libopus (bundled), with gapless trimming where the container reports the encoder gap. A rodio `Player` plays tracks back to back: the next track is loaded early and handed to the player in the last seconds of the current one (gapless), so queue edits until then still decide what follows. The output device is reopened when a track's sample rate differs from the open one. ReplayGain is applied as a fixed gain per track.
+- `audio`: the engine. Tracks are streamed: playback starts once the beginning of the file has arrived while the rest downloads. A read far ahead of the download (a seek, a start at a position, the Ogg demuxer reading the end of the file) is fetched on its own with an HTTP Range request, followed by read-ahead windows, when the server takes ranges and gives the size; otherwise it waits for the download. A track that starts at a position (a handoff, a resume) is positioned before it reaches the output, so nothing plays from elsewhere first. Decoding is Psysonic's: Symphonia 0.6 with every format it supports (FLAC, MP3, AAC/M4A, ALAC, Ogg Vorbis, WAV, AIFF, PCM, ADPCM) plus Opus through libopus (bundled), with gapless trimming where the container reports the encoder gap. A rodio `Player` plays tracks back to back: the next track is loaded early and handed to the player in the last seconds of the current one (gapless), so queue edits until then still decide what follows. The output device is reopened when a track's sample rate differs from the open one. ReplayGain is applied as a fixed gain per track.
 - `player`: the queue (order, current position, shuffle, repeat) and the controller that drives the engine, preloads the next track and reports state.
 - `hub`: the hub client, protocol v1: a player device that reports its state and queue window, obeys commands, and takes part in handoffs through the server's saved play queue.
 - `hub::library`: answers the hub's library lookups and artwork requests from the server, with the same page sizes and fields as the Psysonic desktop.
@@ -52,5 +52,4 @@ One binary, one process. Modules:
 
 ## Open questions
 
-- Streams are downloaded from the start; a seek past what has arrived waits for it (Psysonic uses ranged requests). An MP4 file with its index at the end starts only once fully downloaded.
 - A downloaded track is held in memory until it is done playing (two tracks at most).

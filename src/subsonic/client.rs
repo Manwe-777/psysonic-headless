@@ -3,12 +3,14 @@ use md5::{Digest, Md5};
 use rand::Rng;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use tracing::debug;
 use url::Url;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::models::{AlbumWithSongs, PlayQueue, PlayQueueResponse, PlaylistWithSongs, Song};
-use crate::audio::{Download, StreamSource, stream};
+use crate::audio::{Download, RangeFetcher, StreamSource, stream};
 use crate::config::StreamFormat;
 
 const API_VERSION: &str = "1.16.1";
@@ -227,9 +229,62 @@ impl Subsonic {
             bail!("the server refused to stream {id}");
         }
         let hint = container_hint(content_type);
-        let (download, source) = stream(response.content_length());
+        let len = response.content_length().filter(|n| *n > 0);
+        let takes_ranges = response
+            .headers()
+            .get("accept-ranges")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.to_ascii_lowercase().contains("bytes"));
+        let ranges: Option<Arc<dyn RangeFetcher>> = (takes_ranges && len.is_some()).then(|| {
+            Arc::new(HttpRanges {
+                http: self.http.clone(),
+                url: response.url().clone(),
+                runtime: tokio::runtime::Handle::current(),
+            }) as Arc<dyn RangeFetcher>
+        });
+        let (download, source) = stream(len, ranges);
         tokio::spawn(fill(response, download));
         Ok((source, hint))
+    }
+}
+
+/// Fetches parts of a stream with ranged requests (for seeks ahead of the download).
+struct HttpRanges {
+    http: reqwest::Client,
+    url: Url,
+    runtime: tokio::runtime::Handle,
+}
+
+impl RangeFetcher for HttpRanges {
+    fn fetch(&self, download: Download, start: u64, end: u64) {
+        let (http, url) = (self.http.clone(), self.url.clone());
+        self.runtime.spawn(async move {
+            let result = async {
+                let mut response = http
+                    .get(url)
+                    .header("range", format!("bytes={start}-{}", end - 1))
+                    .send()
+                    .await?
+                    .error_for_status()?;
+                if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+                    bail!("the server ignored the range");
+                }
+                let mut at = start;
+                while at < end && !download.abandoned() {
+                    let Some(chunk) = response.chunk().await? else { break };
+                    let take = chunk.len().min((end - at) as usize);
+                    download.write_at(at, &chunk[..take]);
+                    at += take as u64;
+                }
+                anyhow::Ok(())
+            }
+            .await;
+            if let Err(e) = result {
+                debug!("ranged fetch {start}-{end} failed: {e:#}");
+                tokio::time::sleep(Duration::from_secs(1)).await; // don't hammer a failing server
+            }
+            download.range_finished(start, end);
+        });
     }
 }
 
