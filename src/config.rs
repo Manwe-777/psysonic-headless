@@ -170,7 +170,8 @@ pub enum ReplayGainMode {
     Auto,
 }
 
-/// A secret from an environment variable, or else from a file (trailing whitespace trimmed).
+/// A secret from an environment variable, or else from a file (a trailing line ending is dropped;
+/// other whitespace is kept, since a password may end in a space).
 fn secret(env_name: &str, file: Option<&PathBuf>, flag: &str) -> Result<String> {
     if let Ok(value) = std::env::var(env_name)
         && !value.is_empty()
@@ -181,7 +182,8 @@ fn secret(env_name: &str, file: Option<&PathBuf>, flag: &str) -> Result<String> 
         bail!("set {env_name} or {flag}");
     };
     let value = std::fs::read_to_string(path).with_context(|| format!("could not read {}", path.display()))?;
-    let value = value.trim_end().to_string();
+    let value = value.strip_suffix('\n').unwrap_or(&value);
+    let value = value.strip_suffix('\r').unwrap_or(value).to_string();
     if value.is_empty() {
         bail!("{} is empty", path.display());
     }
@@ -221,6 +223,8 @@ mod tests {
         let file = dir.join("pw");
         std::fs::write(&file, "hunter22\n").unwrap();
         assert_eq!(secret("PSH_TEST_UNSET_VAR", Some(&file), "--x").unwrap(), "hunter22");
+        std::fs::write(&file, "ends in a space \r\n").unwrap();
+        assert_eq!(secret("PSH_TEST_UNSET_VAR", Some(&file), "--x").unwrap(), "ends in a space ");
         std::fs::write(&file, "\n").unwrap();
         assert!(secret("PSH_TEST_UNSET_VAR", Some(&file), "--x").is_err());
         assert!(secret("PSH_TEST_UNSET_VAR", None, "--x").is_err());
