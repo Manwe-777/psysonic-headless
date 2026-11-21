@@ -1,0 +1,26 @@
+[package]
+name = "psysonic-headless"
+version = "0.1.0"
+edition = "2024"
+description = "Headless Psysonic player for a Navidrome server, controlled through a Psysonic Hub"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Manwe-777/psysonic-headless"
+readme = "README.md"
+keywords = ["navidrome", "subsonic", "music-player", "headless", "raspberry-pi"]
+categories = ["multimedia::audio"]
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4", features = ["derive", "env"] }
+md-5 = "0.11.0"
+rand = "0.9"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
+rodio = { version = "0.22", default-features = false, features = ["flac", "mp3", "mp4", "playback", "symphonia-pcm", "vorbis", "wav"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+symphonia = { version = "0.5", default-features = false, features = ["alac"] }
+thiserror = "2.0.21"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "io-std", "io-util"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+url = "2.5.9"
