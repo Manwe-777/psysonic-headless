@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use super::models::{AlbumWithSongs, PlayQueue, PlayQueueResponse, PlaylistWithSongs, Song};
 use crate::audio::{Download, RangeFetcher, StreamSource, stream};
+use crate::cache::{Cache, Kind, Writer};
 use crate::config::StreamFormat;
 
 const API_VERSION: &str = "1.16.1";
@@ -21,6 +22,13 @@ const CLIENT_NAME: &str = "psysonic-headless";
 pub struct Quality {
     pub max_bitrate: u32,
     pub format: StreamFormat,
+}
+
+impl Quality {
+    /// No transcoding: the stream is the original file.
+    pub fn is_original(&self) -> bool {
+        self.max_bitrate == 0 && self.format == StreamFormat::Auto
+    }
 }
 
 /// A client for one server account.
@@ -197,6 +205,30 @@ impl Subsonic {
     }
 
     /// The stream URL for a song, with the quality options (nothing added for the original).
+    pub fn quality(&self) -> &Quality {
+        &self.quality
+    }
+
+    /// A track for the cache: the original file (`format=raw`, as the desktop asks for it) or the
+    /// stream at the current settings.
+    pub async fn download(&self, id: &str, original: bool) -> Result<reqwest::Response> {
+        let url = if original {
+            self.url("stream.view", &[("id", id), ("format", "raw")])
+        } else {
+            self.stream_url(id)
+        };
+        let response = self.http.get(url).send().await?.error_for_status()?;
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if content_type.starts_with("application/json") || content_type.starts_with("text/xml") {
+            bail!("the server refused to send {id}");
+        }
+        Ok(response)
+    }
+
     pub fn stream_url(&self, id: &str) -> Url {
         let bitrate = self.quality.max_bitrate.to_string();
         let mut params = vec![("id", id)];
@@ -212,7 +244,15 @@ impl Subsonic {
     /// Opens a song's stream: returns once the server answers, while the file keeps downloading in
     /// the background, with the container type the server sent (for a transcode that differs from
     /// the original file's).
-    pub async fn open_stream(&self, id: &str) -> Result<(StreamSource, Option<&'static str>)> {
+    ///
+    /// `keep`: also write the stream to the cache as this kind (an original only if its size is
+    /// the original's).
+    pub async fn open_stream(
+        &self,
+        song: &Song,
+        keep: Option<(Arc<Cache>, Kind)>,
+    ) -> Result<(StreamSource, Option<&'static str>)> {
+        let id = song.id.as_str();
         let response = self
             .http
             .get(self.stream_url(id))
@@ -243,7 +283,18 @@ impl Subsonic {
             }) as Arc<dyn RangeFetcher>
         });
         let (download, source) = stream(len, ranges);
-        tokio::spawn(fill(response, download));
+        let keep = match (keep, len) {
+            (Some((cache, kind)), Some(len)) if kind != Kind::Original || song.size.is_none_or(|s| s == len) => {
+                let ext = if kind == Kind::Original {
+                    song.suffix.clone()
+                } else {
+                    hint.map(str::to_string)
+                };
+                cache.writer(id, kind, ext.as_deref()).await.ok().map(|w| (w, len))
+            }
+            _ => None,
+        };
+        tokio::spawn(fill(response, download, keep));
         Ok((source, hint))
     }
 }
@@ -289,21 +340,39 @@ impl RangeFetcher for HttpRanges {
 }
 
 /// Downloads into the stream until the end, an error, or the reader went away.
-async fn fill(mut response: reqwest::Response, download: Download) {
+/// Downloads into the stream until the end, an error, or the reader went away; with `keep`, also
+/// into the cache (kept only when it all arrived).
+async fn fill(mut response: reqwest::Response, download: Download, mut keep: Option<(Writer, u64)>) {
     loop {
         if download.abandoned() {
             return;
         }
         match response.chunk().await {
-            Ok(Some(chunk)) => download.append(&chunk),
-            Ok(None) => return download.finish(),
+            Ok(Some(chunk)) => {
+                download.append(&chunk);
+                if let Some((writer, _)) = &mut keep
+                    && let Err(e) = writer.write(&chunk).await
+                {
+                    debug!("not caching this track: {e:#}");
+                    keep = None;
+                }
+            }
+            Ok(None) => {
+                download.finish();
+                if let Some((writer, len)) = keep
+                    && let Err(e) = writer.commit(len).await
+                {
+                    debug!("not caching this track: {e:#}");
+                }
+                return;
+            }
             Err(e) => return download.fail(e.to_string()),
         }
     }
 }
 
 /// The file extension for a stream's media type, as a format hint for the decoder.
-fn container_hint(content_type: &str) -> Option<&'static str> {
+pub fn container_hint(content_type: &str) -> Option<&'static str> {
     let mime = content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
     Some(match mime.as_str() {
         "audio/ogg" | "application/ogg" | "audio/opus" => "ogg",

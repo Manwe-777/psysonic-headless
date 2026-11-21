@@ -27,6 +27,9 @@ Secrets (hub token, server password) are read from an environment variable or a 
 | `--max-bitrate` | `0` (original) or 320, 256, 192, 128, 96, 64 kbps, like Psysonic |
 | `--format` | `auto`, `mp3`, `opus`, `aac`: transcode format when capped, like Psysonic |
 | `--replay-gain` | `off` (default), `track`, `album`, `auto`, like Psysonic |
+| `--cache` | `original` (default): keep the original files of upcoming tracks, played whatever the bitrate cap, like Psysonic; `streamed`: keep tracks as streamed with the settings above; `off` |
+| `--cache-max-mb` | Cache size, default 256 MB (0 = off) |
+| `--cache-dir` | Default: systemd's `CACHE_DIRECTORY`, `$XDG_CACHE_HOME` or `~/.cache`, then `psysonic-headless` |
 
 Once settings are managed by the hub, the hub's values replace these defaults; the server and hub connection always come from the config.
 
@@ -37,6 +40,7 @@ One binary, one process. Modules:
 - `config`: flags and environment variables.
 - `subsonic`: the server client: authentication (salted token), stream URLs with quality options, albums, playlists, songs, the saved play queue, scrobbling and library lookups.
 - `audio`: the engine. Tracks are streamed: playback starts once the beginning of the file has arrived while the rest downloads. A read far ahead of the download (a seek, a start at a position, the Ogg demuxer reading the end of the file) is fetched on its own with an HTTP Range request, followed by read-ahead windows, when the server takes ranges and gives the size; otherwise it waits for the download. A track that starts at a position (a handoff, a resume) is positioned before it reaches the output, so nothing plays from elsewhere first. Decoding is Psysonic's: Symphonia 0.6 with every format it supports (FLAC, MP3, AAC/M4A, ALAC, Ogg Vorbis, WAV, AIFF, PCM, ADPCM) plus Opus through libopus (bundled), with gapless trimming where the container reports the encoder gap. A rodio `Player` plays tracks back to back: the next track is loaded early and handed to the player in the last seconds of the current one (gapless), so queue edits until then still decide what follows. The output device is reopened when a track's sample rate differs from the open one. ReplayGain is applied as a fixed gain per track.
+- `cache`: the track cache on disk, one folder per server and user. The next five tracks are prefetched (the next always, the ones after while they fit). `original` mode fetches originals with `format=raw` and keeps one only if its size is the original's; a played stream is kept too when it is the original (no cap). `streamed` mode fetches and keeps streams at the current settings, named by bitrate and format, so a copy at other settings never stands in. Files are written as `.part` and renamed once their size matches. When full, the least recently played go first, never the track playing or the next one. A track in the cache plays from it.
 - `player`: the queue (order, current position, shuffle, repeat) and the controller that drives the engine, preloads the next track and reports state.
 - `hub`: the hub client, protocol v1: a player device that reports its state and queue window, obeys commands, and takes part in handoffs through the server's saved play queue.
 - `hub::library`: answers the hub's library lookups and artwork requests from the server, with the same page sizes and fields as the Psysonic desktop.

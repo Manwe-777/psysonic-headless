@@ -28,6 +28,9 @@ pub struct Song {
     pub year: Option<u32>,
     #[serde(default)]
     pub suffix: Option<String>,
+    /// Bytes of the original file.
+    #[serde(default)]
+    pub size: Option<u64>,
     /// ReplayGain tags (OpenSubsonic).
     #[serde(default)]
     pub replay_gain: Option<ReplayGain>,

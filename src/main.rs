@@ -1,11 +1,13 @@
 //! psysonic-headless: a headless Psysonic player for a Navidrome server, controlled through a Psysonic Hub.
 
 mod audio;
+mod cache;
 mod config;
 mod hub;
 mod player;
 mod subsonic;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
@@ -13,7 +15,8 @@ use clap::Parser;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tracing_subscriber::EnvFilter;
 
-use config::{Cli, Command, PlayArgs, RunArgs};
+use cache::Cache;
+use config::{Cli, Command, PlayArgs, PlaybackArgs, RunArgs, ServerArgs};
 use player::{Command as PlayerCommand, Controller, Repeat};
 use subsonic::{Quality, Subsonic};
 
@@ -29,6 +32,17 @@ async fn main() -> Result<()> {
         Command::Devices => list_devices(),
         Command::Play(args) => play(args).await,
     }
+}
+
+/// The track cache for this server and user, unless it is off.
+fn open_cache(server: &ServerArgs, playback: &PlaybackArgs) -> Result<Option<Arc<Cache>>> {
+    let quality = Quality {
+        max_bitrate: playback.max_bitrate,
+        format: playback.format,
+    };
+    let root = playback.cache_dir.clone().unwrap_or_else(cache::default_dir);
+    let key = hub::server_key(&server.server_url, &server.server_user);
+    Cache::open(&root, &key, playback.cache, playback.cache_max_mb, quality)
 }
 
 /// The service mode: a player on the hub until stopped.
@@ -59,13 +73,18 @@ async fn run(args: RunArgs) -> Result<()> {
         server_keys: vec![hub::server_key(&args.server.server_url, &args.server.server_user)],
     };
 
+    let cache = open_cache(&args.server, &args.playback)?;
     let volume = f32::from(args.playback.volume) / 100.0;
     let (commands, status) = Controller::spawn(
         client.clone(),
+        cache.clone(),
         args.playback.audio_device,
         volume,
         args.playback.replay_gain,
     );
+    if let Some(cache) = cache {
+        cache::spawn_prefetch(cache, client.clone(), status.clone());
+    }
     tokio::select! {
         () = hub::run(config, client, commands, status) => {}
         _ = shutdown_signal() => tracing::info!("stopping"),
@@ -130,9 +149,11 @@ async fn play(args: PlayArgs) -> Result<()> {
         bail!("nothing to play: give --album, --playlist or --song");
     }
 
+    let cache = open_cache(&args.server, &args.playback)?;
     let volume = f32::from(args.playback.volume) / 100.0;
     let (commands, status) = Controller::spawn(
-        client,
+        client.clone(),
+        cache.clone(),
         args.playback.audio_device.clone(),
         volume,
         args.playback.replay_gain,
@@ -143,6 +164,10 @@ async fn play(args: PlayArgs) -> Result<()> {
         position: Duration::ZERO,
         play: true,
     })?;
+
+    if let Some(cache) = cache {
+        cache::spawn_prefetch(cache, client, status.clone());
+    }
 
     // What plays, printed whenever it changes.
     let mut watch = status.clone();

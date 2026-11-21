@@ -9,6 +9,8 @@ use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
 
+use symphonia::core::io::MediaSource;
+
 use super::decode::{Decoder, StreamSource};
 use super::devices::find_device;
 
@@ -35,8 +37,30 @@ impl LoadedTrack {
     /// `hint` is the container's file extension, if known.
     pub fn decode(token: u64, media: StreamSource, hint: Option<&str>, gain: f32, start: Duration) -> Result<Self> {
         let random_access = media.random_access();
-        let mut source = Decoder::open(Box::new(media), hint, random_access)
-            .map_err(|e| anyhow!("could not decode the track: {e}"))?;
+        Self::open(token, Box::new(media), random_access, hint, gain, start)
+    }
+
+    /// Opens a cached file, positioned at `start`.
+    pub fn decode_file(
+        token: u64,
+        file: std::fs::File,
+        hint: Option<&str>,
+        gain: f32,
+        start: Duration,
+    ) -> Result<Self> {
+        Self::open(token, Box::new(file), true, hint, gain, start)
+    }
+
+    fn open(
+        token: u64,
+        media: Box<dyn MediaSource>,
+        random_access: bool,
+        hint: Option<&str>,
+        gain: f32,
+        start: Duration,
+    ) -> Result<Self> {
+        let mut source =
+            Decoder::open(media, hint, random_access).map_err(|e| anyhow!("could not decode the track: {e}"))?;
         let start = if start.is_zero() {
             start
         } else {

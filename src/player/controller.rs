@@ -3,10 +3,11 @@ use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::{mpsc, oneshot, watch};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::queue::{Queue, Repeat};
 use crate::audio::{Engine, EngineEvent, LoadedTrack, replay_gain_factor};
+use crate::cache::Cache;
 use crate::config::ReplayGainMode;
 use crate::subsonic::{Song, Subsonic};
 
@@ -100,6 +101,7 @@ const TICK: Duration = Duration::from_millis(500);
 /// it to the engine shortly before the current ends (gapless), and follows commands.
 pub struct Controller {
     client: Subsonic,
+    cache: Option<Arc<Cache>>,
     engine: Arc<Engine>,
     replay_gain: ReplayGainMode,
     queue: Queue,
@@ -124,6 +126,7 @@ impl Controller {
     /// Starts the controller; returns the command sender and the status receiver.
     pub fn spawn(
         client: Subsonic,
+        cache: Option<Arc<Cache>>,
         audio_device: Option<String>,
         volume: f32,
         replay_gain: ReplayGainMode,
@@ -137,6 +140,7 @@ impl Controller {
         });
         let controller = Controller {
             client,
+            cache,
             engine: Arc::new(Engine::new(audio_device, volume, event_tx)),
             replay_gain,
             queue: Queue::default(),
@@ -360,15 +364,30 @@ impl Controller {
         let gain = replay_gain_factor(&song, self.replay_gain, self.queue.in_album(index));
         let generation = self.generation;
         let client = self.client.clone();
+        let cache = self.cache.clone();
         let tx = self.loaded_tx.clone();
         let started = std::time::Instant::now();
         tokio::spawn(async move {
             let result = async {
-                let (media, hint) = client.open_stream(&song.id).await?;
                 let start = match purpose {
                     Purpose::Start { position, .. } => position,
                     Purpose::Next => Duration::ZERO,
                 };
+                if let Some(cache) = &cache
+                    && let Some(hit) = cache.lookup(&song.id)
+                {
+                    cache.touch(&hit.path);
+                    let file = std::fs::File::open(&hit.path)?;
+                    debug!(song = %song.title, "from the cache");
+                    return tokio::task::spawn_blocking(move || {
+                        LoadedTrack::decode_file(token, file, hit.hint.as_deref(), gain, start)
+                    })
+                    .await?;
+                }
+                let keep = cache
+                    .as_ref()
+                    .and_then(|c| c.stream_kind().map(|kind| (c.clone(), kind)));
+                let (media, hint) = client.open_stream(&song, keep).await?;
                 tokio::task::spawn_blocking(move || LoadedTrack::decode(token, media, hint, gain, start)).await?
             }
             .await;

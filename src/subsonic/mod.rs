@@ -3,7 +3,7 @@
 mod client;
 mod models;
 
-pub use client::{Quality, Subsonic};
+pub use client::{Quality, Subsonic, container_hint};
 #[cfg(test)]
 pub use models::ReplayGain;
 pub use models::Song;

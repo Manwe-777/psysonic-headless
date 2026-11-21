@@ -125,6 +125,17 @@ pub struct PlaybackArgs {
     /// ReplayGain: off, track, album, or auto (album gain while an album plays in order).
     #[arg(long, env = "PSYSONIC_REPLAY_GAIN", value_enum, default_value_t = ReplayGainMode::Off)]
     pub replay_gain: ReplayGainMode,
+    /// Track cache: `original` keeps the original files of the tracks coming up (they play whatever
+    /// the bitrate cap; like the desktop app), `streamed` keeps tracks as streamed with the settings
+    /// above, `off` keeps nothing.
+    #[arg(long, env = "PSYSONIC_CACHE", value_enum, default_value_t = CacheMode::Original)]
+    pub cache: CacheMode,
+    /// Track cache size in MB (0 = off).
+    #[arg(long, env = "PSYSONIC_CACHE_MAX_MB", default_value_t = 256)]
+    pub cache_max_mb: u64,
+    /// Where the track cache lives; default: systemd's CACHE_DIRECTORY, $XDG_CACHE_HOME or ~/.cache.
+    #[arg(long, env = "PSYSONIC_CACHE_DIR")]
+    pub cache_dir: Option<PathBuf>,
     /// Starting volume, 0 to 100.
     #[arg(long, env = "PSYSONIC_VOLUME", default_value_t = 100, value_parser = clap::value_parser!(u8).range(0..=100))]
     pub volume: u8,
@@ -160,6 +171,13 @@ impl StreamFormat {
             StreamFormat::Aac => Some("aac"),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CacheMode {
+    Original,
+    Streamed,
+    Off,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
