@@ -1,14 +1,14 @@
-use std::io::Cursor;
 use std::num::NonZero;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use rodio::source::EmptyCallback;
-use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
+use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
 
+use super::decode::{Decoder, StreamSource};
 use super::devices::find_device;
 
 /// What the engine tells the player.
@@ -23,22 +23,14 @@ pub struct LoadedTrack {
     pub token: u64,
     pub sample_rate: u32,
     gain: f32,
-    source: Decoder<Cursor<Vec<u8>>>,
+    source: Decoder,
 }
 
 impl LoadedTrack {
-    /// Decodes a whole file held in memory. `hint` is its file extension, if known.
-    pub fn decode(token: u64, bytes: Vec<u8>, hint: Option<&str>, gain: f32) -> Result<Self> {
-        let len = bytes.len() as u64;
-        let mut builder = Decoder::builder()
-            .with_data(Cursor::new(bytes))
-            .with_byte_len(len)
-            .with_seekable(true)
-            .with_gapless(true);
-        if let Some(hint) = hint {
-            builder = builder.with_hint(hint);
-        }
-        let source = builder.build().context("could not decode the track")?;
+    /// Opens a stream that may still be downloading (blocks until its format is known). `hint` is
+    /// the container's file extension, if known.
+    pub fn decode(token: u64, media: StreamSource, hint: Option<&str>, gain: f32) -> Result<Self> {
+        let source = Decoder::open(Box::new(media), hint).map_err(|e| anyhow!("could not decode the track: {e}"))?;
         Ok(Self {
             token,
             sample_rate: source.sample_rate().get(),

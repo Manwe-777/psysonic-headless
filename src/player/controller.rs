@@ -80,6 +80,8 @@ enum Purpose {
 }
 
 struct Loaded {
+    /// When the load started, to log how long a track took to start.
+    started: std::time::Instant,
     generation: u64,
     index: usize,
     song_id: String,
@@ -290,9 +292,24 @@ impl Controller {
 
     /// Plays the queue position `index` from `position`.
     fn start_at(&mut self, index: usize, position: Duration, play: bool) {
+        // The next track is often already loaded (or loading): use it instead of fetching it again.
+        let ready = self
+            .preloaded
+            .take()
+            .filter(|(_, i, id)| *i == index && self.queue.get(index).is_some_and(|s| s.id == *id || id.is_empty()));
         self.stop();
         self.queue.jump(index);
-        self.load(index, Purpose::Start { position, play });
+        match ready {
+            Some((track, _, id)) => self.track_loaded(Loaded {
+                started: std::time::Instant::now(),
+                generation: self.generation,
+                index,
+                song_id: id,
+                purpose: Purpose::Start { position, play },
+                result: Ok(track),
+            }),
+            None => self.load(index, Purpose::Start { position, play }),
+        }
     }
 
     /// The queue changed around the current song: what follows may be another song now.
@@ -342,14 +359,15 @@ impl Controller {
         let generation = self.generation;
         let client = self.client.clone();
         let tx = self.loaded_tx.clone();
+        let started = std::time::Instant::now();
         tokio::spawn(async move {
             let result = async {
-                let bytes = client.fetch(&song.id).await?;
-                let hint = song.suffix.clone();
-                tokio::task::spawn_blocking(move || LoadedTrack::decode(token, bytes, hint.as_deref(), gain)).await?
+                let (media, hint) = client.open_stream(&song.id).await?;
+                tokio::task::spawn_blocking(move || LoadedTrack::decode(token, media, hint, gain)).await?
             }
             .await;
             let _ = tx.send(Loaded {
+                started,
                 generation,
                 index,
                 song_id: song.id,
@@ -391,6 +409,7 @@ impl Controller {
                 }
                 self.error = None;
                 self.current = Some(token);
+                info!(ms = done.started.elapsed().as_millis() as u64, "started");
                 self.announce();
                 self.preload_after(done.index);
             }

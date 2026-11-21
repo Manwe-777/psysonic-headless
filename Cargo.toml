@@ -10,6 +10,11 @@ keywords = ["navidrome", "subsonic", "music-player", "headless", "raspberry-pi"]
 categories = ["multimedia::audio"]
 
 [dependencies]
+# Decoding like Psysonic: every Symphonia format, plus Opus through libopus (bundled, so the
+# binary needs no system libopus).
+symphonia = { version = "=0.6.1", default-features = false, features = ["flac", "mp3", "pcm", "aac", "alac", "isomp4", "vorbis", "ogg", "wav", "aiff", "adpcm", "all-meta"] }
+symphonia-adapter-libopus = "0.3"
+opusic-sys = { version = "0.7", features = ["bundled"] }
 anyhow = "1.0.104"
 base64 = "0.23.1"
 clap = { version = "4", features = ["derive", "env"] }
@@ -17,11 +22,10 @@ futures-util = "0.3.34"
 md-5 = "0.11.0"
 rand = "0.9"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream", "form"] }
-rodio = { version = "0.22", default-features = false, features = ["flac", "mp3", "mp4", "playback", "symphonia-pcm", "vorbis", "wav"] }
+rodio = { version = "0.22", default-features = false, features = ["playback"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11.1"
-symphonia = { version = "0.5", default-features = false, features = ["alac"] }
 thiserror = "2.0.21"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "io-std", "io-util"] }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }

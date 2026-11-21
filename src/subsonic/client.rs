@@ -8,6 +8,7 @@ use url::Url;
 use std::time::Duration;
 
 use super::models::{AlbumWithSongs, PlayQueue, PlayQueueResponse, PlaylistWithSongs, Song};
+use crate::audio::{Download, StreamSource, stream};
 use crate::config::StreamFormat;
 
 const API_VERSION: &str = "1.16.1";
@@ -37,7 +38,11 @@ impl Subsonic {
             base.set_path(&format!("{}/", base.path()));
         }
         Ok(Self {
-            http: reqwest::Client::builder().user_agent(CLIENT_NAME).build()?,
+            http: reqwest::Client::builder()
+                .user_agent(CLIENT_NAME)
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .read_timeout(std::time::Duration::from_secs(30))
+                .build()?,
             base,
             user: user.to_string(),
             password: password.to_string(),
@@ -197,8 +202,10 @@ impl Subsonic {
         self.url("stream.view", &params)
     }
 
-    /// The whole stream of a song.
-    pub async fn fetch(&self, id: &str) -> Result<Vec<u8>> {
+    /// Opens a song's stream: returns once the server answers, while the file keeps downloading in
+    /// the background, with the container type the server sent (for a transcode that differs from
+    /// the original file's).
+    pub async fn open_stream(&self, id: &str) -> Result<(StreamSource, Option<&'static str>)> {
         let response = self
             .http
             .get(self.stream_url(id))
@@ -206,15 +213,48 @@ impl Subsonic {
             .await
             .context("could not reach the server for a stream")?
             .error_for_status()?;
-        if response
+        let content_type = response
             .headers()
             .get("content-type")
-            .is_some_and(|t| t.as_bytes().starts_with(b"application/json"))
-        {
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if content_type.starts_with("application/json") || content_type.starts_with("text/xml") {
             bail!("the server refused to stream {id}");
         }
-        Ok(response.bytes().await?.to_vec())
+        let hint = container_hint(content_type);
+        let (download, source) = stream(response.content_length());
+        tokio::spawn(fill(response, download));
+        Ok((source, hint))
     }
+}
+
+/// Downloads into the stream until the end, an error, or the reader went away.
+async fn fill(mut response: reqwest::Response, download: Download) {
+    loop {
+        if download.abandoned() {
+            return;
+        }
+        match response.chunk().await {
+            Ok(Some(chunk)) => download.append(&chunk),
+            Ok(None) => return download.finish(),
+            Err(e) => return download.fail(e.to_string()),
+        }
+    }
+}
+
+/// The file extension for a stream's media type, as a format hint for the decoder.
+fn container_hint(content_type: &str) -> Option<&'static str> {
+    let mime = content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    Some(match mime.as_str() {
+        "audio/ogg" | "application/ogg" | "audio/opus" => "ogg",
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        "audio/flac" | "audio/x-flac" => "flac",
+        "audio/mp4" | "audio/x-m4a" | "audio/m4a" => "m4a",
+        "audio/aac" | "audio/aacp" => "aac",
+        "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
+        "audio/aiff" | "audio/x-aiff" => "aiff",
+        _ => return None,
+    })
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -245,6 +285,14 @@ mod tests {
         assert_eq!(param(&url, "t").unwrap(), hex(&Md5::digest(format!("secret{salt}"))));
         assert!(!url.as_str().contains("secret"));
         assert_eq!(param(&url, "u").as_deref(), Some("me"));
+    }
+
+    #[test]
+    fn a_transcoded_stream_is_decoded_as_what_the_server_sent() {
+        assert_eq!(container_hint("audio/ogg"), Some("ogg"));
+        assert_eq!(container_hint("audio/mpeg; charset=binary"), Some("mp3"));
+        assert_eq!(container_hint("audio/x-flac"), Some("flac"));
+        assert_eq!(container_hint("application/octet-stream"), None);
     }
 
     #[test]

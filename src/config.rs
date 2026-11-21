@@ -224,7 +224,10 @@ mod tests {
         std::fs::write(&file, "hunter22\n").unwrap();
         assert_eq!(secret("PSH_TEST_UNSET_VAR", Some(&file), "--x").unwrap(), "hunter22");
         std::fs::write(&file, "ends in a space \r\n").unwrap();
-        assert_eq!(secret("PSH_TEST_UNSET_VAR", Some(&file), "--x").unwrap(), "ends in a space ");
+        assert_eq!(
+            secret("PSH_TEST_UNSET_VAR", Some(&file), "--x").unwrap(),
+            "ends in a space "
+        );
         std::fs::write(&file, "\n").unwrap();
         assert!(secret("PSH_TEST_UNSET_VAR", Some(&file), "--x").is_err());
         assert!(secret("PSH_TEST_UNSET_VAR", None, "--x").is_err());
