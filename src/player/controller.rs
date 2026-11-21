@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{error, info, warn};
 
 use super::queue::{Queue, Repeat};
@@ -11,13 +11,17 @@ use crate::config::ReplayGainMode;
 use crate::subsonic::{Song, Subsonic};
 
 /// What the controller can be asked to do.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Command {
-    /// Replace the queue and play from `start`.
+    /// Replace the queue and start at `start`, from `position`; paused unless `play`.
     Load {
         songs: Vec<Song>,
         start: usize,
+        position: Duration,
+        play: bool,
     },
+    Play,
+    Pause,
     Toggle,
     Next,
     Previous,
@@ -25,6 +29,31 @@ pub enum Command {
     /// Volume from 0.0 to 1.0.
     Volume(f32),
     SetRepeat(Repeat),
+    /// Shuffle on (the upcoming songs are shuffled) or off.
+    SetShuffle(bool),
+    /// Shuffle the whole queue; the current song keeps playing.
+    ShuffleAll,
+    /// Shuffle the songs after the current one.
+    ShuffleUpcoming,
+    /// Play a queue position; ignored when `track_id` is given and another song is there now.
+    PlayIndex {
+        index: usize,
+        track_id: Option<String>,
+    },
+    /// Add songs at the end of the queue.
+    Enqueue(Vec<Song>),
+    /// Insert songs right after the current one.
+    PlayNext(Vec<Song>),
+    /// Pause and report the queue and the exact position, for handing playback to another device.
+    Yield(oneshot::Sender<Snapshot>),
+}
+
+/// The queue and position at one moment.
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    pub songs: Arc<Vec<Song>>,
+    pub current: Option<Song>,
+    pub position: Duration,
 }
 
 /// What plays, for the CLI and the hub.
@@ -32,51 +61,58 @@ pub enum Command {
 pub struct Status {
     pub song: Option<Song>,
     pub index: usize,
-    pub total: usize,
+    pub queue: Arc<Vec<Song>>,
     pub playing: bool,
     pub position: Duration,
     pub volume: f32,
     pub repeat: Repeat,
+    pub shuffle: bool,
     /// The last playback problem, if the latest attempt failed.
     pub error: Option<String>,
 }
 
-/// Why a track is being loaded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Purpose {
-    /// Play it now.
-    Start,
-    /// Queue it after the current track.
+    /// Play it now, from this position, and start playing or stay paused.
+    Start { position: Duration, play: bool },
+    /// Follow the current track.
     Next,
 }
 
 struct Loaded {
     generation: u64,
     index: usize,
+    song_id: String,
     purpose: Purpose,
     result: Result<LoadedTrack>,
 }
 
 /// Before this point "previous" restarts the current track instead of going back (like Psysonic).
 const RESTART_THRESHOLD: Duration = Duration::from_secs(3);
-const STATUS_TICK: Duration = Duration::from_secs(1);
+/// The next track is handed to the engine (for a gapless change) this long before the current ends.
+/// Earlier, it only waits loaded, so queue edits up to then still decide what follows.
+const APPEND_AHEAD: Duration = Duration::from_secs(10);
+const TICK: Duration = Duration::from_millis(500);
 
-/// Plays the queue through the engine: loads the current track, preloads the next one while it
-/// plays and queues it for a gapless change, and follows commands.
+/// Plays the queue through the engine: loads the current track, loads the next one early and hands
+/// it to the engine shortly before the current ends (gapless), and follows commands.
 pub struct Controller {
     client: Subsonic,
     engine: Arc<Engine>,
     replay_gain: ReplayGainMode,
     queue: Queue,
-    /// Bumped whenever the queue position changes by request; loads started before are dropped.
+    shuffle: bool,
+    /// Bumped whenever the queue moves by request; loads started before are dropped.
     generation: u64,
     next_token: u64,
     /// The token of the track playing.
     current: Option<u64>,
-    /// A track already queued in the engine behind the current one: (token, queue position).
+    /// The next track, loaded and waiting to be handed to the engine: (track, position, song id).
+    preloaded: Option<(LoadedTrack, usize, String)>,
+    /// The next track, already queued in the engine behind the current one: (token, position).
     queued: Option<(u64, usize)>,
-    /// A preloaded track that can't follow seamlessly (other sample rate): played when the current ends.
-    pending: Option<(LoadedTrack, usize)>,
+    /// A load of the next track is running.
+    preloading: bool,
     error: Option<String>,
     loaded_tx: mpsc::UnboundedSender<Loaded>,
     status_tx: watch::Sender<Status>,
@@ -102,11 +138,13 @@ impl Controller {
             engine: Arc::new(Engine::new(audio_device, volume, event_tx)),
             replay_gain,
             queue: Queue::default(),
+            shuffle: false,
             generation: 0,
             next_token: 0,
             current: None,
+            preloaded: None,
             queued: None,
-            pending: None,
+            preloading: false,
             error: None,
             loaded_tx,
             status_tx,
@@ -121,7 +159,7 @@ impl Controller {
         mut events: mpsc::UnboundedReceiver<EngineEvent>,
         mut loaded: mpsc::UnboundedReceiver<Loaded>,
     ) {
-        let mut tick = tokio::time::interval(STATUS_TICK);
+        let mut tick = tokio::time::interval(TICK);
         loop {
             tokio::select! {
                 command = commands.recv() => match command {
@@ -130,7 +168,7 @@ impl Controller {
                 },
                 Some(EngineEvent::Ended { token }) = events.recv() => self.track_ended(token),
                 Some(done) = loaded.recv() => self.track_loaded(done),
-                _ = tick.tick() => {}
+                _ = tick.tick() => self.append_when_due(),
             }
             self.publish();
         }
@@ -139,10 +177,17 @@ impl Controller {
 
     fn handle(&mut self, command: Command) {
         match command {
-            Command::Load { songs, start } => {
+            Command::Load {
+                songs,
+                start,
+                position,
+                play,
+            } => {
                 self.queue = Queue::new(songs, start);
-                self.start_at(self.queue.index());
+                self.start_at(self.queue.index(), position, play);
             }
+            Command::Play => self.resume(),
+            Command::Pause => self.engine.pause(),
             Command::Toggle => {
                 if self.engine.is_paused() || self.current.is_none() {
                     self.resume();
@@ -151,23 +196,71 @@ impl Controller {
                 }
             }
             Command::Next => match self.queue.next_index() {
-                Some(index) => self.start_at(index),
+                Some(index) => self.start_at(index, Duration::ZERO, true),
                 None => self.stop(),
             },
             Command::Previous => {
                 if self.engine.position() > RESTART_THRESHOLD {
                     self.seek(Duration::ZERO);
                 } else {
-                    self.start_at(self.queue.previous_index());
+                    self.start_at(self.queue.previous_index(), Duration::ZERO, true);
                 }
             }
             Command::Seek(to) => self.seek(to),
             Command::Volume(v) => self.engine.set_volume(v),
             Command::SetRepeat(repeat) => {
                 self.queue.repeat = repeat;
-                // What follows the current track may have changed: preload it again.
-                self.engine_drop_queued();
-                self.preload_after(self.queue.index());
+                self.next_changed();
+            }
+            Command::SetShuffle(on) => {
+                self.shuffle = on;
+                if on {
+                    self.queue.shuffle_upcoming(&mut rand::rng());
+                    self.next_changed();
+                }
+            }
+            Command::ShuffleAll => {
+                self.queue.shuffle_all(&mut rand::rng());
+                self.next_changed();
+            }
+            Command::ShuffleUpcoming => {
+                self.queue.shuffle_upcoming(&mut rand::rng());
+                self.next_changed();
+            }
+            Command::PlayIndex { index, track_id } => {
+                let matches = self
+                    .queue
+                    .get(index)
+                    .is_some_and(|s| track_id.as_ref().is_none_or(|id| *id == s.id));
+                if matches {
+                    self.start_at(index, Duration::ZERO, true);
+                }
+            }
+            Command::Enqueue(songs) => {
+                let was_empty = self.queue.songs().is_empty();
+                self.queue.append(songs);
+                if was_empty {
+                    self.start_at(0, Duration::ZERO, true);
+                } else {
+                    self.next_changed();
+                }
+            }
+            Command::PlayNext(songs) => {
+                let was_empty = self.queue.songs().is_empty();
+                self.queue.insert_next(songs);
+                if was_empty || self.current.is_none() {
+                    self.start_at(self.queue.index(), Duration::ZERO, true);
+                } else {
+                    self.next_changed();
+                }
+            }
+            Command::Yield(reply) => {
+                self.engine.pause();
+                let _ = reply.send(Snapshot {
+                    songs: Arc::new(self.queue.songs().to_vec()),
+                    current: self.queue.current().cloned(),
+                    position: self.engine.position(),
+                });
             }
         }
     }
@@ -176,7 +269,7 @@ impl Controller {
         if self.current.is_some() {
             self.engine.resume();
         } else if self.queue.current().is_some() {
-            self.start_at(self.queue.index());
+            self.start_at(self.queue.index(), Duration::ZERO, true);
         }
     }
 
@@ -190,31 +283,50 @@ impl Controller {
         self.generation += 1;
         self.engine.stop();
         self.current = None;
+        self.preloaded = None;
         self.queued = None;
-        self.pending = None;
+        self.preloading = false;
     }
 
-    /// Plays the queue position `index` now (from its start).
-    fn start_at(&mut self, index: usize) {
+    /// Plays the queue position `index` from `position`.
+    fn start_at(&mut self, index: usize, position: Duration, play: bool) {
         self.stop();
         self.queue.jump(index);
-        self.load(index, Purpose::Start);
+        self.load(index, Purpose::Start { position, play });
     }
 
-    /// Forgets the track queued behind the current one. The engine keeps playing the current track;
-    /// a queued track already appended can't be taken back, so it is only forgotten when not appended.
-    fn engine_drop_queued(&mut self) {
-        self.pending = None;
-        if self.queued.is_none() {
+    /// The queue changed around the current song: what follows may be another song now.
+    fn next_changed(&mut self) {
+        let next = self.queue.after(self.queue.index());
+        let next_id = next.and_then(|i| self.queue.get(i)).map(|s| s.id.clone());
+        if let Some((_, index, id)) = &self.preloaded
+            && (Some(*index) != next || Some(id) != next_id.as_ref())
+        {
+            self.preloaded = None;
+        }
+        if self.preloading {
+            // A load for the old next song is running: drop its result, keep the current track.
             self.generation += 1;
+            self.preloading = false;
+        }
+        if let Some((_, index)) = self.queued {
+            // Already handed to the engine (the current track is about to end); it stays.
+            if Some(index) != next {
+                warn!("the queue changed in the last seconds of a track: the queued next track still plays");
+            }
+            return;
+        }
+        if self.current.is_some() {
+            self.preload_after(self.queue.index());
         }
     }
 
     fn preload_after(&mut self, index: usize) {
-        if self.queued.is_some() || self.pending.is_some() {
+        if self.preloaded.is_some() || self.queued.is_some() || self.preloading {
             return;
         }
         if let Some(next) = self.queue.after(index) {
+            self.preloading = true;
             self.load(next, Purpose::Next);
         }
     }
@@ -240,6 +352,7 @@ impl Controller {
             let _ = tx.send(Loaded {
                 generation,
                 index,
+                song_id: song.id,
                 purpose,
                 result,
             });
@@ -249,6 +362,9 @@ impl Controller {
     fn track_loaded(&mut self, done: Loaded) {
         if done.generation != self.generation {
             return; // the queue moved on while it loaded
+        }
+        if done.purpose == Purpose::Next {
+            self.preloading = false;
         }
         let track = match done.result {
             Ok(track) => track,
@@ -260,12 +376,18 @@ impl Controller {
             }
         };
         match done.purpose {
-            Purpose::Start => {
+            Purpose::Start { position, play } => {
                 let token = track.token;
                 if let Err(e) = self.engine.play_now(track) {
                     error!("{e:#}");
                     self.error = Some(format!("{e:#}"));
                     return;
+                }
+                if !position.is_zero() {
+                    self.seek(position);
+                }
+                if !play {
+                    self.engine.pause();
                 }
                 self.error = None;
                 self.current = Some(token);
@@ -273,11 +395,27 @@ impl Controller {
                 self.preload_after(done.index);
             }
             Purpose::Next => {
-                let token = track.token;
-                match self.engine.append(track) {
-                    None => self.queued = Some((token, done.index)),
-                    Some(track) => self.pending = Some((track, done.index)),
-                }
+                self.preloaded = Some((track, done.index, done.song_id));
+                self.append_when_due();
+            }
+        }
+    }
+
+    /// Hands the preloaded next track to the engine once the current one is close to its end.
+    fn append_when_due(&mut self) {
+        let Some(duration) = self.queue.current().and_then(|s| s.duration) else {
+            return;
+        };
+        let remaining = Duration::from_secs(u64::from(duration)).saturating_sub(self.engine.position());
+        if self.current.is_none() || remaining > APPEND_AHEAD {
+            return;
+        }
+        if let Some((track, index, id)) = self.preloaded.take() {
+            let token = track.token;
+            match self.engine.append(track) {
+                None => self.queued = Some((token, index)),
+                // Can't follow seamlessly (other sample rate): keep it, it starts when the current ends.
+                Some(track) => self.preloaded = Some((track, index, id)),
             }
         }
     }
@@ -292,7 +430,7 @@ impl Controller {
             self.queue.jump(index);
             self.announce();
             self.preload_after(index);
-        } else if let Some((track, index)) = self.pending.take() {
+        } else if let Some((track, index, _)) = self.preloaded.take() {
             let token = track.token;
             self.queue.jump(index);
             match self.engine.play_now(track) {
@@ -307,7 +445,7 @@ impl Controller {
                 }
             }
         } else if let Some(index) = self.queue.after(self.queue.index()) {
-            self.start_at(index); // the next track wasn't ready in time
+            self.start_at(index, Duration::ZERO, true); // the next track wasn't ready in time
         } else {
             info!("end of the queue");
             self.current = None;
@@ -327,15 +465,25 @@ impl Controller {
     }
 
     fn publish(&self) {
-        let playing = self.current.is_some() && !self.engine.is_paused();
+        let queue_changed = {
+            let current = self.status_tx.borrow();
+            current.queue.len() != self.queue.songs().len()
+                || current.queue.iter().zip(self.queue.songs()).any(|(a, b)| a.id != b.id)
+        };
+        let queue = if queue_changed {
+            Arc::new(self.queue.songs().to_vec())
+        } else {
+            self.status_tx.borrow().queue.clone()
+        };
         self.status_tx.send_replace(Status {
             song: self.current.and(self.queue.current().cloned()),
             index: self.queue.index(),
-            total: self.queue.songs().len(),
-            playing,
+            queue,
+            playing: self.current.is_some() && !self.engine.is_paused(),
             position: self.engine.position(),
             volume: self.engine.volume(),
             repeat: self.queue.repeat,
+            shuffle: self.shuffle,
             error: self.error.clone(),
         });
     }

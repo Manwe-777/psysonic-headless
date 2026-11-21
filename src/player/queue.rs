@@ -79,6 +79,37 @@ impl Queue {
         true
     }
 
+    /// Adds songs at the end.
+    pub fn append(&mut self, songs: Vec<Song>) {
+        self.songs.extend(songs);
+    }
+
+    /// Inserts songs right after the current one ("play next").
+    pub fn insert_next(&mut self, songs: Vec<Song>) {
+        let at = if self.songs.is_empty() { 0 } else { self.index + 1 };
+        self.songs.splice(at..at, songs);
+    }
+
+    /// Shuffles the songs after the current one; the current song and those before it stay put.
+    pub fn shuffle_upcoming(&mut self, rng: &mut impl rand::Rng) {
+        use rand::seq::SliceRandom;
+        if self.index + 1 < self.songs.len() {
+            self.songs[self.index + 1..].shuffle(rng);
+        }
+    }
+
+    /// Shuffles the whole queue with the current song moved to the front, so it keeps playing.
+    pub fn shuffle_all(&mut self, rng: &mut impl rand::Rng) {
+        use rand::seq::SliceRandom;
+        if self.songs.is_empty() {
+            return;
+        }
+        let current = self.songs.remove(self.index);
+        self.songs.shuffle(rng);
+        self.songs.insert(0, current);
+        self.index = 0;
+    }
+
     /// Whether the song at `index` plays as part of its album in order: a neighbour in the queue is
     /// the same album (what ReplayGain's auto mode uses to choose album gain).
     pub fn in_album(&self, index: usize) -> bool {
@@ -140,6 +171,52 @@ mod tests {
     #[test]
     fn a_start_past_the_end_starts_at_the_last_track() {
         assert_eq!(Queue::new(songs(&["a", "b"]), 9).index(), 1);
+    }
+
+    fn ids(q: &Queue) -> Vec<String> {
+        q.songs().iter().map(|s| s.id.clone()).collect()
+    }
+
+    #[test]
+    fn play_next_goes_right_after_the_current_song() {
+        let mut q = Queue::new(songs(&["a", "a", "a"]), 1);
+        q.insert_next(
+            songs(&["x"])
+                .into_iter()
+                .map(|s| Song { id: "new".into(), ..s })
+                .collect(),
+        );
+        assert_eq!(ids(&q), ["s0", "s1", "new", "s2"]);
+        assert_eq!(q.index(), 1, "the current song does not change");
+    }
+
+    #[test]
+    fn adding_to_an_empty_queue_with_play_next_starts_at_the_top() {
+        let mut q = Queue::default();
+        q.insert_next(songs(&["a"]));
+        assert_eq!(ids(&q), ["s0"]);
+    }
+
+    #[test]
+    fn shuffling_the_upcoming_songs_leaves_the_played_and_current_ones_alone() {
+        let mut q = Queue::new(songs(&["a"; 20]), 5);
+        let before = ids(&q);
+        q.shuffle_upcoming(&mut rand::rng());
+        assert_eq!(ids(&q)[..6], before[..6]);
+        let mut rest = ids(&q)[6..].to_vec();
+        rest.sort();
+        let mut expected = before[6..].to_vec();
+        expected.sort();
+        assert_eq!(rest, expected, "the same songs, possibly in another order");
+    }
+
+    #[test]
+    fn shuffling_everything_keeps_the_current_song_playing_first() {
+        let mut q = Queue::new(songs(&["a"; 10]), 4);
+        q.shuffle_all(&mut rand::rng());
+        assert_eq!(q.index(), 0);
+        assert_eq!(q.current().unwrap().id, "s4");
+        assert_eq!(q.songs().len(), 10);
     }
 
     #[test]

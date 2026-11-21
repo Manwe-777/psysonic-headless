@@ -3,5 +3,5 @@
 mod controller;
 mod queue;
 
-pub use controller::{Command, Controller};
+pub use controller::{Command, Controller, Snapshot, Status};
 pub use queue::Repeat;

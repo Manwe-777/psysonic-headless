@@ -5,7 +5,9 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use url::Url;
 
-use super::models::{AlbumWithSongs, PlaylistWithSongs, Song};
+use std::time::Duration;
+
+use super::models::{AlbumWithSongs, PlayQueue, PlayQueueResponse, PlaylistWithSongs, Song};
 use crate::config::StreamFormat;
 
 const API_VERSION: &str = "1.16.1";
@@ -120,6 +122,66 @@ impl Subsonic {
 
     pub async fn song(&self, id: &str) -> Result<Song> {
         self.get("getSong.view", &[("id", id)], "song").await
+    }
+
+    /// The queue saved on the server (what handoffs between devices go through): its songs, the
+    /// current song's id and the position in it.
+    pub async fn play_queue(&self) -> Result<PlayQueue> {
+        let queue: Option<PlayQueueResponse> = self.get("getPlayQueue.view", &[], "playQueue").await?;
+        let queue = queue.unwrap_or_default();
+        Ok(PlayQueue {
+            songs: queue.entry,
+            current: queue.current,
+            position: Duration::from_millis(queue.position.unwrap_or(0)),
+        })
+    }
+
+    /// Saves the queue on the server, as a form post (a long queue doesn't fit in a URL).
+    pub async fn save_play_queue(&self, song_ids: &[String], current: Option<&str>, position: Duration) -> Result<()> {
+        let mut form: Vec<(&str, String)> = song_ids.iter().map(|id| ("id", id.clone())).collect();
+        if let Some(current) = current {
+            form.push(("current", current.to_string()));
+            form.push(("position", position.as_millis().to_string()));
+        }
+        let body: Value = self
+            .http
+            .post(self.url("savePlayQueue.view", &[]))
+            .form(&form)
+            .send()
+            .await
+            .context("could not reach the server to save the queue")?
+            .error_for_status()?
+            .json()
+            .await?;
+        match body.pointer("/subsonic-response/status").and_then(Value::as_str) {
+            Some("ok") => Ok(()),
+            _ => bail!("the server refused to save the queue"),
+        }
+    }
+
+    /// Cover art at about `size` pixels: its bytes and media type.
+    pub async fn cover_art(&self, id: &str, size: u32) -> Result<(Vec<u8>, String)> {
+        let size = size.to_string();
+        let response = self
+            .http
+            .get(self.url("getCoverArt.view", &[("id", id), ("size", &size)]))
+            .send()
+            .await?
+            .error_for_status()?;
+        let mime = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !mime.starts_with("image/") {
+            bail!("no cover art for {id}");
+        }
+        Ok((response.bytes().await?.to_vec(), mime))
     }
 
     /// The stream URL for a song, with the quality options (nothing added for the original).

@@ -58,3 +58,22 @@ pub(crate) struct PlaylistWithSongs {
     #[serde(default)]
     pub entry: Vec<Song>,
 }
+
+/// The queue saved on the server.
+#[derive(Debug, Clone, Default)]
+pub struct PlayQueue {
+    pub songs: Vec<Song>,
+    pub current: Option<String>,
+    pub position: std::time::Duration,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct PlayQueueResponse {
+    #[serde(default)]
+    pub entry: Vec<Song>,
+    #[serde(default)]
+    pub current: Option<String>,
+    /// Milliseconds.
+    #[serde(default)]
+    pub position: Option<u64>,
+}
