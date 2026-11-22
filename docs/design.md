@@ -45,13 +45,21 @@ One binary, one process. Modules:
 - `hub`: the hub client, protocol v1: a player device that reports its state and queue window, obeys commands, and takes part in handoffs through the server's saved play queue.
 - `hub::library`: answers the hub's library lookups and artwork requests from the server, with the same page sizes and fields as the Psysonic desktop.
 
+## Installation
+
+- Releases are cut by semantic-release from `main` (`feat` = minor, `fix` = patch); the version lives in git tags and is built into the binary. Each release carries `psysonic-headless-linux-x86_64` and `-aarch64` (native builds on Ubuntu 22.04: glibc 2.35 or newer, the system's ALSA library), `SHA256SUMS`, `install.sh` and `VERSION`.
+- `install.sh` stays thin: it detects the architecture, installs the ALSA library if missing, downloads the binary, checks it against `SHA256SUMS` and runs `sudo psysonic-headless install` with its arguments.
+- `psysonic-headless install` asks for what is missing (from the terminal, also through `curl | sh`; secrets without echo) or takes flags, checks the server sign-in, and writes `/etc/psysonic-headless/config.env` (the unit's environment file). The password and hub token go to `server-password` and `hub-token` there, owned by root and readable by the service's group only (0640). It creates the `psysonic-headless` system user in the `audio` group, installs the binary to `/usr/local/bin` and the unit, and starts it. Running it again changes the given settings and keeps the rest; it never asks again for what is set.
+- The unit runs `psysonic-headless run` as that user with systemd's cache directory (`/var/cache/psysonic-headless`) for the track cache, and restarts it if it stops.
+- `update` compares the latest release's `VERSION` with its own, downloads the binary, checks it and runs its `install`. `uninstall` removes the unit and binary and keeps the settings and cache; `--purge` removes those and the user too. `PSYSONIC_DOWNLOAD` points both at another release folder (a URL or a directory).
+
 ## Roadmap
 
 1. Play an album, playlist or songs from the server to the output device from the command line, gapless, with ReplayGain and quality options.
 2. Join the hub as a player: state, commands, queue window, handoff with Psysonic.
 3. Answer library and artwork lookups, so the web remote can browse with only this player on.
 4. Scrobbling.
-5. Packaging: a `.deb` with a systemd unit running as its own user in the `audio` group, arm64 and x86_64 builds.
+5. Packaging: one-line installer, systemd service, `update`, x86_64 and aarch64 releases.
 6. Settings managed from the hub: the player publishes its settings and the web remote edits them.
 
 ## Open questions

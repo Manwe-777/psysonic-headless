@@ -20,3 +20,80 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+  # semantic-release decides the next version from the commits (feat = minor, fix = patch).
+  plan:
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: next
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npx -y -p semantic-release@24 -p @semantic-release/exec@6 semantic-release --dry-run
+          echo "version=$(cat .next-version 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
+
+  # Native builds on Ubuntu 22.04, so they run on glibc 2.35 and newer (Raspberry Pi OS 12+).
+  build:
+    needs: plan
+    if: needs.plan.outputs.version != ''
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            os: ubuntu-22.04
+          - arch: aarch64
+            os: ubuntu-22.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev cmake
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --release
+        env:
+          PSYSONIC_HEADLESS_VERSION: ${{ needs.plan.outputs.version }}
+      - run: |
+          mkdir dist
+          cp target/release/psysonic-headless dist/psysonic-headless-linux-${{ matrix.arch }}
+          dist/psysonic-headless-linux-${{ matrix.arch }} --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: psysonic-headless-linux-${{ matrix.arch }}
+          path: dist/
+
+  release:
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: |
+          cp packaging/install.sh dist/
+          echo "${{ needs.plan.outputs.version }}" > dist/VERSION
+          (cd dist && sha256sum psysonic-headless-linux-* > SHA256SUMS && cat SHA256SUMS)
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PLANNED_VERSION: ${{ needs.plan.outputs.version }}
+        run: npx -y -p semantic-release@24 -p @semantic-release/exec@6 semantic-release

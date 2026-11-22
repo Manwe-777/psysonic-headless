@@ -1,6 +1,6 @@
 [package]
 name = "psysonic-headless"
-version = "0.1.0"
+version = "0.0.0"
 edition = "2024"
 description = "Headless Psysonic player for a Navidrome server, controlled through a Psysonic Hub"
 license = "GPL-3.0-or-later"
@@ -32,3 +32,8 @@ tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = "2.5.9"
+libc = "0.2.191"
+rpassword = "7.5.5"
+
+[profile.release]
+strip = true

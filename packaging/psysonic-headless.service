@@ -1,0 +1,30 @@
+# Installed by `psysonic-headless install`; settings in /etc/psysonic-headless/config.env.
+[Unit]
+Description=Psysonic headless player
+Documentation=https://github.com/Manwe-777/psysonic-headless
+Wants=network-online.target
+After=network-online.target sound.target
+
+[Service]
+ExecStart=/usr/local/bin/psysonic-headless run
+EnvironmentFile=/etc/psysonic-headless/config.env
+# Readable by root and this service's group only.
+Environment=PSYSONIC_SERVER_PASSWORD_FILE=/etc/psysonic-headless/server-password
+Environment=PSYSONIC_HUB_TOKEN_FILE=/etc/psysonic-headless/hub-token
+User=psysonic-headless
+Group=psysonic-headless
+SupplementaryGroups=audio
+CacheDirectory=psysonic-headless
+Restart=always
+RestartSec=5
+Nice=-5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target

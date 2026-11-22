@@ -10,7 +10,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 #[derive(Debug, Parser)]
 #[command(
     name = "psysonic-headless",
-    version,
+    version = VERSION,
     about = "Headless Psysonic player for a Navidrome server"
 )]
 pub struct Cli {
@@ -26,6 +26,81 @@ pub enum Command {
     Devices,
     /// Play an album, a playlist or songs from the server, with keyboard controls.
     Play(PlayArgs),
+    /// Install (or reconfigure) the player as a systemd service; run again to change settings.
+    Install(InstallArgs),
+    /// Update to the latest release (keeps the settings).
+    Update(UpdateArgs),
+    /// Remove the service and the binary; the settings stay unless --purge.
+    Uninstall(UninstallArgs),
+}
+
+/// The release version (set by the release build), or the crate's with `-dev`.
+pub const VERSION: &str = match option_env!("PSYSONIC_HEADLESS_VERSION") {
+    Some(v) => v,
+    None => concat!(env!("CARGO_PKG_VERSION"), "-dev"),
+};
+
+/// Settings left out keep their current value; on a first install the missing required ones are
+/// asked for. The server password and hub token are asked for without echo (or read from a file).
+#[derive(Debug, Args)]
+pub struct InstallArgs {
+    /// Navidrome / Subsonic server address.
+    #[arg(long)]
+    pub server_url: Option<String>,
+    /// Server user name.
+    #[arg(long)]
+    pub server_user: Option<String>,
+    /// Read the server password from this file instead of asking.
+    #[arg(long)]
+    pub server_password_file: Option<PathBuf>,
+    /// Psysonic Hub address.
+    #[arg(long)]
+    pub hub_url: Option<String>,
+    /// Read the hub's device token from this file instead of asking.
+    #[arg(long)]
+    pub hub_token_file: Option<PathBuf>,
+    /// Ask for the server password and hub token again.
+    #[arg(long)]
+    pub new_secrets: bool,
+    /// How this player appears on the hub (default: the host name).
+    #[arg(long)]
+    pub device_name: Option<String>,
+    /// Output device (see `psysonic-headless devices`); empty = the system default.
+    #[arg(long)]
+    pub audio_device: Option<String>,
+    /// Maximum stream bitrate in kbps (0 = original).
+    #[arg(long, value_parser = parse_bitrate)]
+    pub max_bitrate: Option<u32>,
+    #[arg(long, value_enum)]
+    pub format: Option<StreamFormat>,
+    #[arg(long, value_enum)]
+    pub replay_gain: Option<ReplayGainMode>,
+    #[arg(long, value_enum)]
+    pub cache: Option<CacheMode>,
+    #[arg(long)]
+    pub cache_max_mb: Option<u64>,
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=100))]
+    pub volume: Option<u8>,
+    /// Install without starting the service.
+    #[arg(long)]
+    pub no_start: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct UpdateArgs {
+    /// Only say whether a newer release exists.
+    #[arg(long)]
+    pub check: bool,
+    /// Reinstall even when this is the latest.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct UninstallArgs {
+    /// Also delete the settings, the secrets and the track cache.
+    #[arg(long)]
+    pub purge: bool,
 }
 
 #[derive(Debug, Args)]
@@ -199,6 +274,11 @@ fn secret(env_name: &str, file: Option<&PathBuf>, flag: &str) -> Result<String> 
     let Some(path) = file else {
         bail!("set {env_name} or {flag}");
     };
+    read_secret_file(path)
+}
+
+/// A secret from a file: a trailing line ending is dropped, other whitespace kept.
+pub fn read_secret_file(path: &std::path::Path) -> Result<String> {
     let value = std::fs::read_to_string(path).with_context(|| format!("could not read {}", path.display()))?;
     let value = value.strip_suffix('\n').unwrap_or(&value);
     let value = value.strip_suffix('\r').unwrap_or(value).to_string();

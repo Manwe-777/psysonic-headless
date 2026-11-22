@@ -4,6 +4,7 @@ mod audio;
 mod cache;
 mod config;
 mod hub;
+mod install;
 mod player;
 mod subsonic;
 
@@ -31,6 +32,9 @@ async fn main() -> Result<()> {
         Command::Run(args) => run(args).await,
         Command::Devices => list_devices(),
         Command::Play(args) => play(args).await,
+        Command::Install(args) => install::install(args).await,
+        Command::Update(args) => install::update(args).await,
+        Command::Uninstall(args) => install::uninstall(args),
     }
 }
 

@@ -9,6 +9,7 @@
 - **Milestone 3, library:** answers the hub's library lookups (albums by sort with paging, artists, playlists, search, an album, an artist, a playlist) and artwork requests, with the desktop's page sizes and fields. Checked against the real Navidrome through a local hub with only this player on: every lookup answered in 10 to 80 ms, artwork in under 10 ms.
 - **Ranged reads and starts at a position:** seeks and starts ahead of the download fetch that part with a Range request, and Ogg/AIFF stay seekable while probing (before, every seek on Navidrome's Opus transcodes failed and a handoff started at 0:00). A track starting at a position is positioned before it reaches the output. Checked with a handoff through a local hub into this player at 2:00 of a 320 kbps Opus stream: it resumed at 2:00, 0.3 s after the transfer.
 - **Track cache** (`--cache original|streamed|off`, 256 MB by default): prefetches the next five tracks within the size limit and plays them from disk, with the desktop's rules for originals. Checked against the real Navidrome at a 320 kbps cap: the next two hi-res FLAC originals (90 and 103 MB) were prefetched while the first track streamed, and skipping to them started in 0 and 52 ms.
+- **Milestone 5, packaging:** `curl | sh` installer, `install` / `update` / `uninstall`, systemd service as the `psysonic-headless` user, releases by semantic-release with native x86_64 and aarch64 builds. `tests/installer.sh` checks it on Debian 13 and Ubuntu 22.04 in Docker.
 
 ## Known issues
 
@@ -18,5 +19,4 @@
 ## Next
 
 - Milestone 4: scrobbling.
-- Milestone 5: packaging (.deb, systemd unit, arm64 builds, release workflow).
 - Milestone 6: settings managed from the hub.
