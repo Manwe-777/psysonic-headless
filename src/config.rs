@@ -32,6 +32,15 @@ pub enum Command {
     Update(UpdateArgs),
     /// Remove the service and the binary; the settings stay unless --purge.
     Uninstall(UninstallArgs),
+    /// Sign in to Last.fm (allow access in a browser) and save the session key to a file.
+    LastfmLogin(LastfmLoginArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct LastfmLoginArgs {
+    /// Where to save the session key (then pass it to `run` as --lastfm-session-file).
+    #[arg(long)]
+    pub session_file: PathBuf,
 }
 
 /// The release version (set by the release build), or the crate's with `-dev`.
@@ -81,6 +90,16 @@ pub struct InstallArgs {
     pub cache_max_mb: Option<u64>,
     #[arg(long, value_parser = clap::value_parser!(u8).range(0..=100))]
     pub volume: Option<u8>,
+    #[arg(long, value_enum)]
+    pub scrobble: Option<OnOff>,
+    #[arg(long, value_parser = clap::value_parser!(u8).range(crate::scrobble::PERCENT_RANGE))]
+    pub scrobble_percent: Option<u8>,
+    /// Scrobble to Last.fm: shows a link to allow access (also to sign in again).
+    #[arg(long, conflicts_with = "no_lastfm")]
+    pub lastfm: bool,
+    /// Stop scrobbling to Last.fm and forget the session.
+    #[arg(long)]
+    pub no_lastfm: bool,
     /// Install without starting the service.
     #[arg(long)]
     pub no_start: bool,
@@ -109,6 +128,8 @@ pub struct PlayArgs {
     pub server: ServerArgs,
     #[command(flatten)]
     pub playback: PlaybackArgs,
+    #[command(flatten)]
+    pub scrobble: ScrobbleArgs,
     /// Album id to play.
     #[arg(long, conflicts_with_all = ["playlist", "song"])]
     pub album: Option<String>,
@@ -128,6 +149,28 @@ pub struct RunArgs {
     pub hub: HubArgs,
     #[command(flatten)]
     pub playback: PlaybackArgs,
+    #[command(flatten)]
+    pub scrobble: ScrobbleArgs,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct ScrobbleArgs {
+    /// Report plays to the server (play counts, recently played) and to Last.fm when signed in.
+    #[arg(long, env = "PSYSONIC_SCROBBLE", value_enum, default_value_t = OnOff::On)]
+    pub scrobble: OnOff,
+    /// How much of a track has to play before it counts, in percent (25 to 90, like Psysonic).
+    #[arg(long, env = "PSYSONIC_SCROBBLE_PERCENT", default_value_t = 50,
+        value_parser = clap::value_parser!(u8).range(crate::scrobble::PERCENT_RANGE))]
+    pub scrobble_percent: u8,
+    /// File holding the Last.fm session key (from `lastfm-login`); without it, no Last.fm.
+    #[arg(long, env = "PSYSONIC_LASTFM_SESSION_FILE")]
+    pub lastfm_session_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OnOff {
+    On,
+    Off,
 }
 
 #[derive(Debug, Args)]

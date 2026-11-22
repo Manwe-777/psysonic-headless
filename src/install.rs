@@ -27,6 +27,7 @@ const ETC: &str = "/etc/psysonic-headless";
 const CONFIG: &str = "/etc/psysonic-headless/config.env";
 const PASSWORD: &str = "/etc/psysonic-headless/server-password";
 const TOKEN: &str = "/etc/psysonic-headless/hub-token";
+const LASTFM_SESSION: &str = "/etc/psysonic-headless/lastfm-session";
 const UNIT: &str = "/etc/systemd/system/psysonic-headless.service";
 const UNIT_TEXT: &str = include_str!("../packaging/psysonic-headless.service");
 const CACHE_DIRS: [&str; 2] = ["/var/cache/psysonic-headless", "/var/cache/private/psysonic-headless"];
@@ -60,6 +61,8 @@ pub async fn install(a: InstallArgs) -> Result<()> {
     set("PSYSONIC_CACHE", value_name(a.cache));
     set("PSYSONIC_CACHE_MAX_MB", a.cache_max_mb.map(|n| n.to_string()));
     set("PSYSONIC_VOLUME", a.volume.map(|n| n.to_string()));
+    set("PSYSONIC_SCROBBLE", value_name(a.scrobble));
+    set("PSYSONIC_SCROBBLE_PERCENT", a.scrobble_percent.map(|n| n.to_string()));
     for (key, question) in [
         ("PSYSONIC_SERVER_URL", "Navidrome server address (https://...)"),
         ("PSYSONIC_SERVER_USER", "Navidrome user name"),
@@ -105,6 +108,27 @@ pub async fn install(a: InstallArgs) -> Result<()> {
         println!("signed in to {}", config["PSYSONIC_SERVER_URL"]);
     }
 
+    // Last.fm: asked on the first install, else only with --lastfm; access is allowed in a browser.
+    // (Not offered by a build without the app's key.)
+    let offer = first && !a.no_lastfm && crate::scrobble::lastfm::App::get().is_ok();
+    let lastfm = a.lastfm || (offer && ask_yes_no("Scrobble to Last.fm? [y/N]"));
+    let lastfm_session = if lastfm {
+        let app = crate::scrobble::lastfm::App::get()?;
+        let (session, name) = crate::scrobble::lastfm::sign_in(&app, |url| {
+            println!("\nOpen this link on any device and allow access to Last.fm:\n\n  {url}\n\nWaiting...");
+        })
+        .await?;
+        println!("signed in to Last.fm as {name}");
+        config.insert("PSYSONIC_LASTFM_SESSION_FILE".into(), LASTFM_SESSION.into());
+        Some(session)
+    } else {
+        None
+    };
+    if a.no_lastfm {
+        config.remove("PSYSONIC_LASTFM_SESSION_FILE");
+        remove(Path::new(LASTFM_SESSION))?;
+    }
+
     ensure_audio_group()?;
     let gid = ensure_user()?;
     fs::create_dir_all(ETC)?;
@@ -115,6 +139,9 @@ pub async fn install(a: InstallArgs) -> Result<()> {
     }
     if let Some(t) = token {
         write(Path::new(TOKEN), t.as_bytes(), 0o640, Some(gid))?;
+    }
+    if let Some(s) = lastfm_session {
+        write(Path::new(LASTFM_SESSION), s.as_bytes(), 0o640, Some(gid))?;
     }
 
     let me = std::env::current_exe()?.canonicalize()?;
@@ -131,6 +158,9 @@ pub async fn install(a: InstallArgs) -> Result<()> {
     println!("  service: systemctl status psysonic-headless   (logs: journalctl -u psysonic-headless -f)");
     println!("  output:  psysonic-headless devices, then sudo psysonic-headless install --audio-device NAME");
     println!("  update:  sudo psysonic-headless update");
+    if !config.contains_key("PSYSONIC_LASTFM_SESSION_FILE") {
+        println!("  last.fm: sudo psysonic-headless install --lastfm");
+    }
     Ok(())
 }
 
@@ -324,6 +354,32 @@ fn ask(question: &str) -> Result<String> {
             return Ok(line);
         }
     }
+}
+
+/// A yes/no question at the terminal; no terminal (or no answer) is no.
+fn ask_yes_no(question: &str) -> bool {
+    let Ok(tty) = fs::File::options().read(true).write(true).open("/dev/tty") else {
+        return false;
+    };
+    let Ok(mut out) = tty.try_clone() else {
+        return false;
+    };
+    if write!(out, "{question} ").and_then(|()| out.flush()).is_err() {
+        return false;
+    }
+    let mut line = String::new();
+    if std::io::BufReader::new(&tty).read_line(&mut line).is_err() {
+        return false;
+    }
+    matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
+}
+
+/// Writes a file only its owner can read (a secret saved by hand, outside the service).
+pub fn write_private(path: &Path, data: &[u8]) -> Result<()> {
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        fs::create_dir_all(dir)?;
+    }
+    write(path, data, 0o600, None)
 }
 
 fn ask_secret(question: &str) -> Result<String> {

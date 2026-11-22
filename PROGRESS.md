@@ -10,13 +10,14 @@
 - **Ranged reads and starts at a position:** seeks and starts ahead of the download fetch that part with a Range request, and Ogg/AIFF stay seekable while probing (before, every seek on Navidrome's Opus transcodes failed and a handoff started at 0:00). A track starting at a position is positioned before it reaches the output. Checked with a handoff through a local hub into this player at 2:00 of a 320 kbps Opus stream: it resumed at 2:00, 0.3 s after the transfer.
 - **Track cache** (`--cache original|streamed|off`, 256 MB by default): prefetches the next five tracks within the size limit and plays them from disk, with the desktop's rules for originals. Checked against the real Navidrome at a 320 kbps cap: the next two hi-res FLAC originals (90 and 103 MB) were prefetched while the first track streamed, and skipping to them started in 0 and 52 ms.
 - **Milestone 5, packaging:** `curl | sh` installer, `install` / `update` / `uninstall`, systemd service as the `psysonic-headless` user, releases by semantic-release with native x86_64 and aarch64 builds. `tests/installer.sh` checks it on Debian 13 and Ubuntu 22.04 in Docker.
+- **Milestone 4, scrobbling:** now playing and plays at 50% (`--scrobble-percent`), like Psysonic, to the server and straight to Last.fm. Last.fm sign-in through a link opened on any device (`install --lastfm`, `lastfm-login`), with the app's key built into release builds; failed Last.fm plays retried with backoff. Checked against the real Navidrome: now playing showed the player, the play count went up with the play's start time.
 
 ## Known issues
 
 - Not yet tried on a real DAC, or in a handoff with the Psysonic desktop app.
+- Last.fm scrobbling not yet checked against Last.fm itself (needs the app's key); plays not sent yet are lost on a restart.
 - A queue edit in the last 10 seconds of a track can't change the next track any more (it is already queued in the engine).
 
 ## Next
 
-- Milestone 4: scrobbling.
 - Milestone 6: settings managed from the hub.

@@ -122,6 +122,20 @@ impl Subsonic {
         self.get(endpoint, params, key).await
     }
 
+    /// Reports a play: `played_at` (Unix milliseconds) submits it, counting it on the server;
+    /// without it the song is only shown as playing now.
+    pub async fn scrobble(&self, id: &str, played_at: Option<i64>) -> Result<()> {
+        let time = played_at.map(|t| t.to_string());
+        let mut params = vec![
+            ("id", id),
+            ("submission", if time.is_some() { "true" } else { "false" }),
+        ];
+        if let Some(t) = &time {
+            params.push(("time", t));
+        }
+        self.get::<Value>("scrobble.view", &params, "").await.map(|_| ())
+    }
+
     pub async fn ping(&self) -> Result<()> {
         self.get::<Value>("ping.view", &[], "").await.map(|_| ())
     }

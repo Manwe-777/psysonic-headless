@@ -11,6 +11,9 @@ pub struct Song {
     pub artist: Option<String>,
     #[serde(default)]
     pub artist_id: Option<String>,
+    /// Each artist on its own (OpenSubsonic), where `artist` may join several.
+    #[serde(default)]
+    pub artists: Vec<ArtistRef>,
     #[serde(default)]
     pub album: Option<String>,
     #[serde(default)]
@@ -34,6 +37,24 @@ pub struct Song {
     /// ReplayGain tags (OpenSubsonic).
     #[serde(default)]
     pub replay_gain: Option<ReplayGain>,
+}
+
+/// An artist of a song (OpenSubsonic).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ArtistRef {
+    #[serde(default)]
+    pub name: String,
+}
+
+impl Song {
+    /// The main artist: the first of `artists`, else `artist` (like Psysonic, for scrobbling).
+    pub fn main_artist(&self) -> Option<&str> {
+        self.artists
+            .first()
+            .map(|a| a.name.trim())
+            .filter(|n| !n.is_empty())
+            .or(self.artist.as_deref())
+    }
 }
 
 /// ReplayGain values in dB and linear peaks, as OpenSubsonic servers report them.

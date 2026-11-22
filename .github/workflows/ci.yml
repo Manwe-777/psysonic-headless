@@ -64,6 +64,9 @@ jobs:
       - run: cargo build --locked --release
         env:
           PSYSONIC_HEADLESS_VERSION: ${{ needs.plan.outputs.version }}
+          # The app's Last.fm key, built in so listeners only allow access in a browser.
+          PSYSONIC_HEADLESS_LASTFM_KEY: ${{ secrets.LASTFM_API_KEY }}
+          PSYSONIC_HEADLESS_LASTFM_SECRET: ${{ secrets.LASTFM_API_SECRET }}
       - run: |
           mkdir dist
           cp target/release/psysonic-headless dist/psysonic-headless-linux-${{ matrix.arch }}

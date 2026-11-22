@@ -6,6 +6,7 @@ mod config;
 mod hub;
 mod install;
 mod player;
+mod scrobble;
 mod subsonic;
 
 use std::sync::Arc;
@@ -17,7 +18,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tracing_subscriber::EnvFilter;
 
 use cache::Cache;
-use config::{Cli, Command, PlayArgs, PlaybackArgs, RunArgs, ServerArgs};
+use config::{Cli, Command, LastfmLoginArgs, OnOff, PlayArgs, PlaybackArgs, RunArgs, ScrobbleArgs, ServerArgs};
 use player::{Command as PlayerCommand, Controller, Repeat};
 use subsonic::{Quality, Subsonic};
 
@@ -38,7 +39,47 @@ async fn main() -> Result<()> {
         Command::Install(args) => install::install(args).await,
         Command::Update(args) => install::update(args).await,
         Command::Uninstall(args) => install::uninstall(args),
+        Command::LastfmLogin(args) => lastfm_login(args).await,
     }
+}
+
+/// Reports plays to the server and Last.fm, unless scrobbling is off.
+fn start_scrobbling(
+    client: &Subsonic,
+    args: &ScrobbleArgs,
+    status: &tokio::sync::watch::Receiver<player::Status>,
+) -> Result<()> {
+    if args.scrobble == OnOff::Off {
+        return Ok(());
+    }
+    let lastfm = match &args.lastfm_session_file {
+        Some(file) => {
+            let session = config::read_secret_file(file)?;
+            Some(scrobble::LastFm::new(scrobble::lastfm::App::get()?, session)?)
+        }
+        None => None,
+    };
+    tracing::info!(
+        "scrobbling at {}% to the server{}",
+        args.scrobble_percent,
+        if lastfm.is_some() { " and Last.fm" } else { "" }
+    );
+    scrobble::spawn_scrobbler(client.clone(), lastfm, args.scrobble_percent, status.clone());
+    Ok(())
+}
+
+async fn lastfm_login(args: LastfmLoginArgs) -> Result<()> {
+    let app = scrobble::lastfm::App::get()?;
+    let (session, name) = scrobble::lastfm::sign_in(&app, |url| {
+        println!("Open this link and allow access, on any device:\n\n  {url}\n\nWaiting...");
+    })
+    .await?;
+    install::write_private(&args.session_file, session.as_bytes())?;
+    println!(
+        "signed in to Last.fm as {name}; session saved to {}",
+        args.session_file.display()
+    );
+    Ok(())
 }
 
 /// The track cache for this server and user, unless it is off.
@@ -92,6 +133,7 @@ async fn run(args: RunArgs) -> Result<()> {
     if let Some(cache) = cache {
         cache::spawn_prefetch(cache, client.clone(), status.clone());
     }
+    start_scrobbling(&client, &args.scrobble, &status)?;
     tokio::select! {
         () = hub::run(config, client, commands, status) => {}
         _ = shutdown_signal() => tracing::info!("stopping"),
@@ -172,6 +214,7 @@ async fn play(args: PlayArgs) -> Result<()> {
         play: true,
     })?;
 
+    start_scrobbling(&client, &args.scrobble, &status)?;
     if let Some(cache) = cache {
         cache::spawn_prefetch(cache, client, status.clone());
     }

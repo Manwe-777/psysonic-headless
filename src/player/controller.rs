@@ -70,6 +70,10 @@ pub struct Status {
     pub shuffle: bool,
     /// The last playback problem, if the latest attempt failed.
     pub error: Option<String>,
+    /// Counts the plays: bumped whenever a track starts (also the same one again, on repeat).
+    pub play: u64,
+    /// Where the current play started (not zero after a handoff or a resume).
+    pub play_start: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +122,8 @@ pub struct Controller {
     /// A load of the next track is running.
     preloading: bool,
     error: Option<String>,
+    play: u64,
+    play_start: Duration,
     loaded_tx: mpsc::UnboundedSender<Loaded>,
     status_tx: watch::Sender<Status>,
 }
@@ -152,6 +158,8 @@ impl Controller {
             queued: None,
             preloading: false,
             error: None,
+            play: 0,
+            play_start: Duration::ZERO,
             loaded_tx,
             status_tx,
         };
@@ -494,7 +502,10 @@ impl Controller {
         }
     }
 
-    fn announce(&self) {
+    /// A track started playing (a new play, for scrobbling).
+    fn announce(&mut self) {
+        self.play += 1;
+        self.play_start = self.engine.position();
         if let Some(song) = self.queue.current() {
             info!(
                 position = self.queue.index() + 1,
@@ -527,6 +538,8 @@ impl Controller {
             repeat: self.queue.repeat,
             shuffle: self.shuffle,
             error: self.error.clone(),
+            play: self.play,
+            play_start: self.play_start,
         });
     }
 }
