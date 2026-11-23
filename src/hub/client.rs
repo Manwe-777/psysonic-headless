@@ -2,11 +2,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot, watch};
+use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info, warn};
 
@@ -31,6 +32,12 @@ type Out = mpsc::UnboundedSender<Value>;
 
 /// While playing, the state is re-sent this often so other devices' clocks stay right.
 const HEARTBEAT: Duration = Duration::from_secs(5);
+/// A ping goes to the hub this often; the hub answers it (and sends its own every 30 s).
+const KEEPALIVE: Duration = Duration::from_secs(20);
+/// Nothing at all from the hub for this long means the connection is dead (after a sleep or a
+/// network change it can look open while nothing gets through), so the player reconnects.
+const SILENCE_LIMIT: Duration = Duration::from_secs(45);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const BACKOFF: [u64; 5] = [1, 2, 5, 10, 30];
 /// After the hub refused the token or the protocol version, wait this long before trying again.
 const REFUSED_WAIT: Duration = Duration::from_secs(300);
@@ -82,8 +89,9 @@ async fn session(
     commands: &mpsc::UnboundedSender<Command>,
     mut status: watch::Receiver<Status>,
 ) -> Result<Option<u16>> {
-    let (ws, _) = tokio_tungstenite::connect_async(url)
+    let (ws, _) = tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(url))
         .await
+        .map_err(|_| anyhow!("the hub didn't answer within {} s", CONNECT_TIMEOUT.as_secs()))?
         .context("could not reach the hub")?;
     let (mut sink, mut stream) = ws.split();
     let (out, mut out_rx) = mpsc::unbounded_channel::<Value>();
@@ -108,12 +116,16 @@ async fn session(
     };
     let mut reporter = Reporter::default();
     let mut heartbeat = tokio::time::interval(HEARTBEAT);
+    let mut keepalive = tokio::time::interval_at(Instant::now() + KEEPALIVE, KEEPALIVE);
+    let mut last_heard = Instant::now();
     let mut welcomed = false;
     let close_code = loop {
         tokio::select! {
             frame = stream.next() => {
                 let Some(frame) = frame else { break None };
-                match frame? {
+                let frame = frame?;
+                last_heard = Instant::now();
+                match frame {
                     Message::Text(text) => {
                         let Ok(msg) = serde_json::from_str::<Value>(&text) else { continue };
                         if msg["t"] == "welcome" {
@@ -139,6 +151,13 @@ async fn session(
             _ = heartbeat.tick(), if welcomed => {
                 let s = status.borrow().clone();
                 if s.playing { let _ = out.send(protocol::state(&s)); }
+            }
+            _ = keepalive.tick() => {
+                if last_heard.elapsed() > SILENCE_LIMIT {
+                    writer.abort();
+                    bail!("the hub stopped answering");
+                }
+                let _ = out.send(json!({ "t": "ping" }));
             }
         }
     };
