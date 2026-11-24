@@ -1,0 +1,57 @@
+name: Upstream
+
+# Weekly look at the Psysonic and hub code this player follows (upstream/). Changes since the last
+# sync are listed in one open issue labelled "upstream"; it is closed once everything is synced.
+on:
+  schedule:
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Report upstream changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set +e
+          scripts/upstream.sh status > status.md
+          code=$?
+          set -e
+          cat status.md
+          [ "$code" -eq 0 ] || [ "$code" -eq 10 ] || exit "$code"
+
+          issue=$(gh issue list --label upstream --state open --json number --jq '.[0].number // empty')
+          if [ "$code" -eq 0 ]; then
+            [ -z "$issue" ] || gh issue close "$issue" --comment "Everything followed upstream is synced."
+            exit 0
+          fi
+
+          # The tips seen, so a later run knows whether there is anything new to mention.
+          tips=$(grep -oE 'from `[0-9a-f]+` to `[0-9a-f]+`' status.md | sort | tr '\n' ' ')
+          {
+            echo "Upstream code this player follows has changed since it was last synced."
+            echo "Port what applies, then run \`scripts/upstream.sh mark <source>\` and commit \`upstream/sources.tsv\`."
+            echo "\`scripts/upstream.sh diff <headless file>\` shows the upstream diff for one file."
+            echo
+            cat status.md
+            echo "<!-- tips: $tips -->"
+          } | head -c 60000 > body.md
+
+          if [ -z "$issue" ]; then
+            gh label create upstream --color 5319e7 --description "Upstream changes to port" --force
+            gh issue create --title "Upstream changes to port" --label upstream --body-file body.md
+          else
+            seen=$(gh issue view "$issue" --json body --jq .body | grep -oE '<!-- tips: .* -->' || true)
+            gh issue edit "$issue" --body-file body.md
+            if [ "$seen" != "<!-- tips: $tips -->" ]; then
+              gh issue comment "$issue" --body "New upstream commits since the last check; the list above is updated."
+            fi
+          fi

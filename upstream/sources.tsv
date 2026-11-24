@@ -1,0 +1,5 @@
+# The upstream code psysonic-headless follows, and the commit of each it was last synced with.
+# Columns (tab-separated): name, git URL, branch, synced commit. `scripts/upstream.sh mark` updates the last one.
+psysonic	https://github.com/Psysonic/psysonic.git	main	1ab4306fbf545edbc8cd212be67994224d920d9a
+hub-client	https://github.com/ImAsra/psysonic.git	feat/hub-poc	63f84686c3ec7b21cfb8e89681f82ea990b29401
+hub	https://github.com/ImAsra/psysonic-hub.git	main	3673f106d788f23797e1d080fe89155a0525b567

@@ -1,0 +1,23 @@
+# Which headless file follows which upstream file or folder.
+# Columns (tab-separated): headless file, source name (from sources.tsv), upstream path.
+# A headless file may follow several upstream paths, one line each.
+src/audio/decode/codec.rs	psysonic	src-tauri/crates/psysonic-audio/src/codec.rs
+src/audio/decode/decoder.rs	psysonic	src-tauri/crates/psysonic-audio/src/decode/decoder.rs
+src/audio/decode/decoder.rs	psysonic	src-tauri/crates/psysonic-audio/src/decode/decoder_streaming.rs
+src/audio/decode/decoder.rs	psysonic	src-tauri/crates/psysonic-audio/src/decode/gapless.rs
+src/audio/decode/probe_gate.rs	psysonic	src-tauri/crates/psysonic-audio/src/decode/source_probe.rs
+src/audio/decode/stream.rs	psysonic	src-tauri/crates/psysonic-audio/src/stream/ranged_http
+src/audio/gain.rs	psysonic	src/features/playback/utils/audio/resolveReplayGainDb.ts
+src/cache/mod.rs	psysonic	src/features/playback/store/hotCacheStore.ts
+src/cache/prefetch.rs	psysonic	src/hotCachePrefetch.ts
+src/cache/prefetch.rs	psysonic	src/hotCachePrefetch
+src/subsonic/client.rs	psysonic	src/lib/api/subsonicClient.ts
+src/subsonic/client.rs	psysonic	src/lib/api/subsonicStreamUrl.ts
+src/scrobble/mod.rs	psysonic	src/lib/api/subsonicScrobble.ts
+src/scrobble/mod.rs	psysonic	src/features/playback/store/scrobblePlaySession.ts
+src/scrobble/lastfm.rs	psysonic	src/music-network/wires/audioscrobbler
+src/hub/client.rs	hub-client	src/features/hub/hubClient.ts
+src/hub/library.rs	hub-client	src/features/hub/hubLibrary.ts
+src/hub/server_keys.rs	hub-client	src/features/hub/hubServerKeys.ts
+src/hub/protocol.rs	hub	docs/PROTOCOL.md
+src/hub/protocol.rs	hub	shared/protocol.ts
