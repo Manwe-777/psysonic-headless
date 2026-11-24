@@ -89,7 +89,7 @@ fn open_cache(server: &ServerArgs, playback: &PlaybackArgs) -> Result<Option<Arc
         format: playback.format,
     };
     let root = playback.cache_dir.clone().unwrap_or_else(cache::default_dir);
-    let key = hub::server_key(&server.server_url, &server.server_user);
+    let key = hub::address_hash(&server.server_url, &server.server_user);
     Cache::open(&root, &key, playback.cache, playback.cache_max_mb, quality)
 }
 
@@ -110,7 +110,7 @@ async fn run(args: RunArgs) -> Result<()> {
     let host = hostname();
     let name = args.hub.device_name.clone().unwrap_or_else(|| host.clone());
     let device_id = args.hub.device_id.clone().unwrap_or_else(|| {
-        let key = hub::server_key(&host, &name); // any stable hash of host + name will do
+        let key = hub::address_hash(&host, &name); // any stable hash of host + name will do
         format!("headless-{}", &key[..12])
     });
     let config = hub::HubConfig {

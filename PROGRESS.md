@@ -18,7 +18,6 @@
 - Not yet tried on a real DAC, or in a handoff with the Psysonic desktop app.
 - Last.fm scrobbling not yet checked against Last.fm itself (needs the app's key); plays not sent yet are lost on a restart.
 - A queue edit in the last 10 seconds of a track can't change the next track any more (it is already queued in the engine).
-- Hub server keys lowercase the user name upstream since ImAsra/psysonic#6; headless still hashes it as typed, so a user name with capitals gets a different key from the desktops.
 
 ## Next
 
