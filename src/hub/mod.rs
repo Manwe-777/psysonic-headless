@@ -3,6 +3,7 @@
 mod client;
 mod library;
 mod protocol;
+mod queue_edits;
 mod server_keys;
 
 pub use client::{HubConfig, run};

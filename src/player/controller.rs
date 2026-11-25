@@ -45,6 +45,32 @@ pub enum Command {
     Enqueue(Vec<Song>),
     /// Insert songs right after the current one.
     PlayNext(Vec<Song>),
+    /// Insert songs before a queue position.
+    InsertAt {
+        at: usize,
+        songs: Vec<Song>,
+    },
+    /// Remove the entries a remote meant, as (position, song id) as it saw them. The song playing stays.
+    Remove(Vec<(usize, String)>),
+    /// Move the song at `from` so it ends up at `to`; ignored when another song is at `from` now.
+    Move {
+        from: usize,
+        to: usize,
+        track_id: String,
+    },
+    /// Move the songs at `indices` as one block into the gap before `gap`. With `expect`, only while
+    /// those positions still hold these songs (the queue may have changed since the remote saw it).
+    MoveBlock {
+        indices: Vec<usize>,
+        expect: Option<Vec<String>>,
+        gap: usize,
+    },
+    /// Stop and empty the queue.
+    Clear,
+    /// Keep only the song playing.
+    ClearExceptCurrent,
+    /// Drop the songs after the one playing.
+    DropUpcoming,
     /// Pause and report the queue and the exact position, for handing playback to another device.
     Yield(oneshot::Sender<Snapshot>),
 }
@@ -117,8 +143,8 @@ pub struct Controller {
     current: Option<u64>,
     /// The next track, loaded and waiting to be handed to the engine: (track, position, song id).
     preloaded: Option<(LoadedTrack, usize, String)>,
-    /// The next track, already queued in the engine behind the current one: (token, position).
-    queued: Option<(u64, usize)>,
+    /// The next track, already queued in the engine behind the current one: (token, position, song id).
+    queued: Option<(u64, usize, String)>,
     /// A load of the next track is running.
     preloading: bool,
     error: Option<String>,
@@ -268,6 +294,55 @@ impl Controller {
                     self.next_changed();
                 }
             }
+            Command::InsertAt { at, songs } => {
+                let was_empty = self.queue.songs().is_empty();
+                self.queue.insert_at(at, songs);
+                if was_empty {
+                    self.start_at(0, Duration::ZERO, true);
+                } else {
+                    self.next_changed();
+                }
+            }
+            Command::Remove(positions) => {
+                let picked = self.queue.pick(&positions);
+                if self.queue.remove(&picked, self.current.is_some()) {
+                    self.next_changed();
+                }
+            }
+            Command::Move { from, to, track_id } => {
+                if self.queue.get(from).is_some_and(|s| s.id == track_id) && self.queue.move_one(from, to) {
+                    self.next_changed();
+                }
+            }
+            Command::MoveBlock { indices, expect, gap } => {
+                let still = expect.is_none_or(|ids| {
+                    ids.len() == indices.len()
+                        && indices
+                            .iter()
+                            .zip(&ids)
+                            .all(|(i, id)| self.queue.get(*i).is_some_and(|s| s.id == *id))
+                });
+                if still && self.queue.move_block(&indices, gap) {
+                    self.next_changed();
+                }
+            }
+            Command::Clear => self.clear(),
+            Command::ClearExceptCurrent => {
+                if self.current.is_none() {
+                    self.clear();
+                } else {
+                    self.queue.keep_only_current();
+                    self.next_changed();
+                }
+            }
+            Command::DropUpcoming => {
+                if self.current.is_none() {
+                    self.clear();
+                } else {
+                    self.queue.drop_upcoming();
+                    self.next_changed();
+                }
+            }
             Command::Yield(reply) => {
                 self.engine.pause();
                 let _ = reply.send(Snapshot {
@@ -291,6 +366,11 @@ impl Controller {
         if let Err(e) = self.engine.seek(to) {
             warn!("{e}");
         }
+    }
+
+    fn clear(&mut self) {
+        self.stop();
+        self.queue.clear();
     }
 
     fn stop(&mut self) {
@@ -340,9 +420,9 @@ impl Controller {
             self.generation += 1;
             self.preloading = false;
         }
-        if let Some((_, index)) = self.queued {
+        if let Some((_, _, id)) = &self.queued {
             // Already handed to the engine (the current track is about to end); it stays.
-            if Some(index) != next {
+            if next_id.as_ref() != Some(id) {
                 warn!("the queue changed in the last seconds of a track: the queued next track still plays");
             }
             return;
@@ -463,7 +543,7 @@ impl Controller {
         if let Some((track, index, id)) = self.preloaded.take() {
             let token = track.token;
             match self.engine.append(track) {
-                None => self.queued = Some((token, index)),
+                None => self.queued = Some((token, index, id)),
                 // Can't follow seamlessly (other sample rate): keep it, it starts when the current ends.
                 Some(track) => self.preloaded = Some((track, index, id)),
             }
@@ -474,8 +554,9 @@ impl Controller {
         if self.current != Some(token) {
             return;
         }
-        if let Some((next, index)) = self.queued.take() {
-            // Already playing, without a gap.
+        if let Some((next, index, id)) = self.queued.take() {
+            // Already playing, without a gap. A queue edit since may have moved it: find it by its id.
+            let index = self.queue.find_after(index, &id);
             self.current = Some(next);
             self.queue.jump(index);
             self.announce();

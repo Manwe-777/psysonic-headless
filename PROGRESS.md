@@ -12,6 +12,7 @@
 - **Milestone 5, packaging:** `curl | sh` installer, `install` / `update` / `uninstall`, systemd service as the `psysonic-headless` user, releases by semantic-release with native x86_64 and aarch64 builds. `tests/installer.sh` checks it on Debian 13 and Ubuntu 22.04 in Docker.
 - **Milestone 4, scrobbling:** now playing and plays at 50% (`--scrobble-percent`), like Psysonic, to the server and straight to Last.fm. Last.fm sign-in through a link opened on any device (`install --lastfm`, `lastfm-login`), with the app's key built into release builds; failed Last.fm plays retried with backoff. Checked against the real Navidrome: now playing showed the player, the play count went up with the play's start time.
 - **Following upstream:** `upstream/` maps each headless file to the Psysonic, hub client and hub code it follows, with the commit last synced; `scripts/upstream.sh` shows what changed since, and a weekly workflow keeps an `upstream` issue listing it (docs/upstream.md).
+- **Shared queue owner (synced with ImAsra/psysonic feat/hub-poc 5fd1623b and the hub's main 7982557):** queue edits from other devices and the web remote (add in parts, remove, move one, move a block, clear, keep current, drop upcoming; undo/redo only answered) are applied and saved, then announced with `queue-changed`; a takeover starts on the track the hub reported; an idle player follows a cleared shared queue. Checked end to end against a local hub, a fake Subsonic server and a scripted desktop (14 steps).
 
 ## Known issues
 

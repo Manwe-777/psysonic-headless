@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -13,6 +13,7 @@ use tracing::{error, info, warn};
 
 use super::library;
 use super::protocol::{self, PROTOCOL};
+use super::queue_edits::{AddMode, Edit, EditReader};
 use crate::player::{Command, Snapshot, Status};
 use crate::subsonic::{Song, Subsonic};
 
@@ -41,6 +42,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const BACKOFF: [u64; 5] = [1, 2, 5, 10, 30];
 /// After the hub refused the token or the protocol version, wait this long before trying again.
 const REFUSED_WAIT: Duration = Duration::from_secs(300);
+/// A queue change is saved on the server this long after the last one (edits come in bursts).
+const SAVE_DELAY: Duration = Duration::from_millis(400);
+/// Songs a remote asked to add are looked up this many at a time.
+const LOOKUPS_AT_ONCE: usize = 8;
 const COVER_SIZE: u32 = 400;
 const COVER_MAX_BYTES: usize = 700_000;
 
@@ -55,9 +60,11 @@ pub async fn run(
         error!("not a valid hub address: {}", config.url);
         return;
     };
+    // The queue known to be saved on the server (song ids), across reconnects.
+    let saved_queue = SavedQueue::default();
     let mut attempt = 0;
     loop {
-        match session(&config, url.as_str(), &client, &commands, status.clone()).await {
+        match session(&config, url.as_str(), &client, &commands, status.clone(), &saved_queue).await {
             Ok(Some(code @ (4004 | 4005))) => {
                 let why = if code == 4005 {
                     "refused the token"
@@ -88,6 +95,7 @@ async fn session(
     client: &Subsonic,
     commands: &mpsc::UnboundedSender<Command>,
     mut status: watch::Receiver<Status>,
+    saved_queue: &SavedQueue,
 ) -> Result<Option<u16>> {
     let (ws, _) = tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(url))
         .await
@@ -107,18 +115,37 @@ async fn session(
         "name": config.name, "kind": "desktop", "server": config.server_keys,
     }));
 
+    // Queue edits from remotes are applied one after another, in the order they came in.
+    let (edits, mut edits_rx) = mpsc::unbounded_channel::<Edit>();
+    let (edited, mut edited_rx) = mpsc::unbounded_channel::<()>();
+    let editor = {
+        let (client, commands) = (client.clone(), commands.clone());
+        tokio::spawn(async move {
+            while let Some(edit) = edits_rx.recv().await {
+                apply_edit(&client, &commands, edit).await;
+                let _ = edited.send(());
+            }
+        })
+    };
     let ctx = Session {
         config: config.clone(),
         client: client.clone(),
         commands: commands.clone(),
         out: out.clone(),
         replacements: Arc::default(),
+        saved_queue: saved_queue.clone(),
+        edits,
+        reader: Mutex::default(),
     };
     let mut reporter = Reporter::default();
     let mut heartbeat = tokio::time::interval(HEARTBEAT);
     let mut keepalive = tokio::time::interval_at(Instant::now() + KEEPALIVE, KEEPALIVE);
     let mut last_heard = Instant::now();
     let mut welcomed = false;
+    // When the queue is next saved (or, after an edit that changed nothing, only announced).
+    let mut save_at: Option<Instant> = None;
+    let mut edit_seen = false;
+    let mut queue_seen = queue_key(&status.borrow().queue);
     let close_code = loop {
         tokio::select! {
             frame = stream.next() => {
@@ -145,9 +172,23 @@ async fn session(
                 Ok(()) => {
                     let s = status.borrow_and_update().clone();
                     reporter.report(&s, &ctx, false);
+                    let key = queue_key(&s.queue);
+                    if key != queue_seen {
+                        queue_seen = key;
+                        save_at = Some(Instant::now() + SAVE_DELAY);
+                    }
                 }
                 Err(_) => break None, // the player stopped
             },
+            Some(()) = edited_rx.recv() => {
+                edit_seen = true;
+                save_at = Some(Instant::now() + SAVE_DELAY);
+            }
+            _ = tokio::time::sleep_until(save_at.unwrap_or_else(|| Instant::now() + KEEPALIVE)), if save_at.is_some() => {
+                save_at = None;
+                let s = status.borrow().clone();
+                ctx.save_queue_change(&s, std::mem::take(&mut edit_seen));
+            }
             _ = heartbeat.tick(), if welcomed => {
                 let s = status.borrow().clone();
                 if s.playing { let _ = out.send(protocol::state(&s)); }
@@ -162,6 +203,7 @@ async fn session(
         }
     };
     writer.abort();
+    editor.abort();
     Ok(close_code)
 }
 
@@ -173,6 +215,28 @@ struct Session {
     out: Out,
     /// Bumped by every "play this" (replace) request: a lookup that finishes after a newer one is dropped.
     replacements: Arc<AtomicU64>,
+    saved_queue: SavedQueue,
+    edits: mpsc::UnboundedSender<Edit>,
+    reader: Mutex<EditReader>,
+}
+
+/// The song ids of the queue known to be on the server: saved here, or pulled from it. A queue
+/// that matches it is not saved again (a pulled queue saved straight back would bounce between devices).
+#[derive(Clone, Default)]
+struct SavedQueue(Arc<Mutex<String>>);
+
+impl SavedQueue {
+    fn set(&self, key: String) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = key;
+    }
+
+    fn get(&self) -> String {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+fn queue_key(songs: &[Song]) -> String {
+    songs.iter().map(|s| s.id.as_str()).collect::<Vec<_>>().join(",")
 }
 
 impl Session {
@@ -186,7 +250,21 @@ impl Session {
 
     fn handle(&self, msg: &Value, status: &watch::Receiver<Status>) {
         match msg["t"].as_str().unwrap_or_default() {
-            "command" => self.apply(msg["action"].as_str().unwrap_or_default(), &msg["args"]),
+            "command" => {
+                let action = msg["action"].as_str().unwrap_or_default();
+                let edit =
+                    self.reader
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .read(action, &msg["args"], Instant::now());
+                match edit {
+                    Some(edit) => {
+                        let _ = self.edits.send(edit);
+                    }
+                    None if action == "queueAdd" => {} // waiting for the add's other parts
+                    None => self.apply(action, &msg["args"]),
+                }
+            }
             "yield" => self.yield_to(msg["to"].as_str().unwrap_or_default().to_string()),
             "takeover" => self.take_over(msg),
             "queue-changed" => {
@@ -202,7 +280,35 @@ impl Session {
         }
     }
 
-    /// A command from another device (protocol `command` actions).
+    /// The queue changed here. As the player, this device is the one that saves the shared queue:
+    /// save it and tell the others (they pull it). Only while playing or after a remote's edit, so
+    /// an idle device never overwrites the queue another one plays. An edit that changed nothing is
+    /// still announced, so the remote drops what it showed and pulls the real queue.
+    fn save_queue_change(&self, s: &Status, edited: bool) {
+        let key = queue_key(&s.queue);
+        if key == self.saved_queue.get() || !(s.playing || edited) {
+            if edited {
+                self.send(json!({ "t": "queue-changed" }));
+            }
+            return;
+        }
+        let snapshot = Snapshot {
+            songs: s.queue.clone(),
+            current: s.queue.get(s.index).cloned(),
+            position: s.position,
+        };
+        let (client, out, saved_queue) = (self.client.clone(), self.out.clone(), self.saved_queue.clone());
+        tokio::spawn(async move {
+            match save_queue(&client, &snapshot).await {
+                Ok(()) => {
+                    saved_queue.set(key);
+                    let _ = out.send(json!({ "t": "queue-changed" }));
+                }
+                Err(e) => warn!("could not save the queue: {e:#}"),
+            }
+        });
+    }
+
     /// A remote browses the library through this player.
     fn answer_browse(&self, rid: Value, req: Value) {
         let (client, out) = (self.client.clone(), self.out.clone());
@@ -325,10 +431,16 @@ impl Session {
     fn yield_to(&self, to: String) {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command(Command::Yield(reply_tx));
-        let (client, out) = (self.client.clone(), self.out.clone());
+        let (client, out, saved_queue) = (self.client.clone(), self.out.clone(), self.saved_queue.clone());
         tokio::spawn(async move {
             let saved = match reply_rx.await {
-                Ok(snapshot) => save_queue(&client, &snapshot).await,
+                Ok(snapshot) => {
+                    let saved = save_queue(&client, &snapshot).await;
+                    if saved.is_ok() {
+                        saved_queue.set(queue_key(&snapshot.songs));
+                    }
+                    saved
+                }
                 Err(_) => Err(anyhow::anyhow!("the player stopped")),
             };
             let reply = match saved {
@@ -359,14 +471,12 @@ impl Session {
         let age = Duration::from_millis(msg["ageMs"].as_u64().unwrap_or(0));
         let fresh = msg["fresh"] == true;
         let (client, commands, out) = (self.client.clone(), self.commands.clone(), self.out.clone());
+        let saved_queue = self.saved_queue.clone();
         tokio::spawn(async move {
             match client.play_queue().await {
                 Ok(saved) if !saved.songs.is_empty() => {
-                    let start = saved
-                        .current
-                        .as_ref()
-                        .and_then(|c| saved.songs.iter().position(|s| &s.id == c))
-                        .unwrap_or(0);
+                    saved_queue.set(queue_key(&saved.songs));
+                    let start = takeover_start(&saved.songs, saved.current.as_deref(), &state, fresh);
                     let position = if fresh {
                         Duration::ZERO
                     } else {
@@ -390,13 +500,16 @@ impl Session {
         });
     }
 
-    /// Replaces the idle queue with the one saved on the server, without playing.
+    /// Replaces the idle queue with the one saved on the server, without playing. A shared queue that
+    /// was cleared is cleared here too.
     fn follow_saved_queue(&self) {
-        let (client, commands) = (self.client.clone(), self.commands.clone());
+        let (client, commands, saved_queue) = (self.client.clone(), self.commands.clone(), self.saved_queue.clone());
         tokio::spawn(async move {
-            if let Ok(saved) = client.play_queue().await
-                && !saved.songs.is_empty()
-            {
+            let Ok(saved) = client.play_queue().await else { return };
+            saved_queue.set(queue_key(&saved.songs));
+            if saved.songs.is_empty() {
+                let _ = commands.send(Command::Clear);
+            } else {
                 let start = saved
                     .current
                     .as_ref()
@@ -425,6 +538,50 @@ fn takeover_position(state: &Value, age: Duration, song: &Song) -> Option<Durati
     }
     let end = f64::from(song.duration.unwrap_or(0)) - 0.5;
     Some(Duration::from_secs_f64(if end > 0.0 { sec.min(end) } else { sec }))
+}
+
+/// Applies a remote's queue edit through the player. Songs to add are looked up on this device's
+/// server first; ids it does not know are skipped.
+async fn apply_edit(client: &Subsonic, commands: &mpsc::UnboundedSender<Command>, edit: Edit) {
+    let command = match edit {
+        Edit::Add { mode, ids } => {
+            let songs: Vec<Song> = futures_util::stream::iter(ids)
+                .map(|id| async move { client.song(&id).await })
+                .buffered(LOOKUPS_AT_ONCE)
+                .filter_map(|song| async move { song.ok() })
+                .collect()
+                .await;
+            if songs.is_empty() {
+                return;
+            }
+            match mode {
+                AddMode::End => Command::Enqueue(songs),
+                AddMode::Next => Command::PlayNext(songs),
+                AddMode::At(at) => Command::InsertAt { at, songs },
+            }
+        }
+        Edit::Remove(positions) => Command::Remove(positions),
+        Edit::Move { from, to, track_id } => Command::Move { from, to, track_id },
+        Edit::MoveBlock { indices, expect, gap } => Command::MoveBlock { indices, expect, gap },
+        Edit::Clear => Command::Clear,
+        Edit::ClearExceptCurrent => Command::ClearExceptCurrent,
+        Edit::DropUpcoming => Command::DropUpcoming,
+        Edit::Nothing => return,
+    };
+    let _ = commands.send(command);
+}
+
+/// The queue position a takeover starts at: the track the hub reported as playing, when the saved
+/// queue holds it (the saved current track can lag behind). A click-to-play handoff (`fresh`) starts
+/// at the saved current track, which the remote just picked.
+fn takeover_start(songs: &[Song], current: Option<&str>, state: &Value, fresh: bool) -> usize {
+    let by_current = current.and_then(|c| songs.iter().position(|s| s.id == c));
+    let reported = state["trackId"].as_str().filter(|_| !fresh);
+    match reported {
+        Some(id) if by_current.is_some_and(|i| songs[i].id == id) => by_current.unwrap_or(0),
+        Some(id) => songs.iter().position(|s| s.id == id).or(by_current).unwrap_or(0),
+        None => by_current.unwrap_or(0),
+    }
 }
 
 async fn songs_of(client: &Subsonic, kind: &str, id: &str) -> Result<Vec<Song>> {
@@ -528,6 +685,37 @@ mod tests {
     fn another_track_uses_the_position_saved_on_the_server() {
         let state = json!({ "trackId": "other", "positionSec": 60.0, "playing": true });
         assert_eq!(takeover_position(&state, Duration::ZERO, &song("s1", 300)), None);
+    }
+
+    fn queue(ids: &[&str]) -> Vec<Song> {
+        ids.iter().map(|id| song(id, 300)).collect()
+    }
+
+    #[test]
+    fn a_takeover_starts_on_the_track_the_hub_reported_even_if_the_saved_one_lags() {
+        let songs = queue(&["a", "b", "c"]);
+        let state = json!({ "trackId": "c" });
+        assert_eq!(takeover_start(&songs, Some("b"), &state, false), 2);
+        // The same track twice: the saved current entry, when it is that track.
+        let songs = queue(&["c", "b", "c"]);
+        assert_eq!(takeover_start(&songs, Some("c"), &state, false), 0);
+    }
+
+    #[test]
+    fn a_click_to_play_handoff_starts_on_the_track_the_remote_picked() {
+        let songs = queue(&["a", "b", "c"]);
+        let state = json!({ "trackId": "c" });
+        assert_eq!(takeover_start(&songs, Some("a"), &state, true), 0);
+    }
+
+    #[test]
+    fn a_reported_track_not_in_the_saved_queue_falls_back_to_the_saved_current_one() {
+        let songs = queue(&["a", "b"]);
+        assert_eq!(
+            takeover_start(&songs, Some("b"), &json!({ "trackId": "zzz" }), false),
+            1
+        );
+        assert_eq!(takeover_start(&songs, None, &json!({}), false), 0);
     }
 
     #[test]

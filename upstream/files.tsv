@@ -21,3 +21,7 @@ src/hub/library.rs	hub-client	src/features/hub/hubLibrary.ts
 src/hub/server_keys.rs	hub-client	src/features/hub/hubServerKeys.ts
 src/hub/protocol.rs	hub	docs/PROTOCOL.md
 src/hub/protocol.rs	hub	shared/protocol.ts
+src/hub/queue_edits.rs	hub-client	src/features/hub/hubQueueEdits.ts
+src/hub/client.rs	hub-client	src/features/hub/hubQueue.ts
+src/player/queue.rs	psysonic	src/features/playback/utils/playback/queueBlockEdits.ts
+src/player/queue.rs	psysonic	src/features/playback/store/queueMutationActions.ts
